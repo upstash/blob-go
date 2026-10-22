@@ -38,7 +38,7 @@ var (
 )
 
 // MultipartOver moves the line: a body over threshold bytes goes up in parts. A threshold above the
-// single-PUT cap is honoured up to the cap.
+// single-PUT cap is honoured up to the cap; a negative one is 0, which parts every non-empty body.
 func MultipartOver(threshold int64) Multipart {
 	return Multipart{mode: multipartOver, threshold: max(threshold, 0)}
 }

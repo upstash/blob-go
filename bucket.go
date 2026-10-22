@@ -1,6 +1,7 @@
 package blob
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"encoding/xml"
@@ -606,6 +607,12 @@ func (b *Bucket) SignedReadURL(ctx context.Context, path string, opts *SignedRea
 		opts = &SignedReadURLOptions{}
 	}
 	expiresIn := defaultReadSeconds
+	if opts.ExpiresIn < 0 {
+		return nil, newErr(CodeInvalidInput, "ExpiresIn cannot be negative")
+	}
+	if opts.ExpiresIn < 0 {
+		return nil, newErr(CodeInvalidInput, "ExpiresIn cannot be negative")
+	}
 	if opts.ExpiresIn != 0 {
 		expiresIn = durationSeconds(opts.ExpiresIn)
 	}
@@ -1038,7 +1045,7 @@ type UpdateJSONOptions struct {
 }
 
 // UpdateJSON is a read-modify-write over a JSON document: If-Match on the etag that was read, or
-// If-None-Match: * when nothing was there. fn gets nil when nothing (or an empty object) is stored.
+// If-None-Match: * when nothing was there. fn gets nil when nothing, a zero-byte object, or JSON null is stored.
 // A write that lost the race is re-read and re-run after a short jittered pause, up to MaxAttempts
 // times; then it fails with CodeConflict. fn may run more than once.
 func UpdateJSON[T any](ctx context.Context, b *Bucket, path string, fn func(prev *T) (T, error), opts *UpdateJSONOptions) (*BlobObject, error) {
@@ -1065,8 +1072,8 @@ func UpdateJSON[T any](ctx context.Context, b *Bucket, path string, fn func(prev
 			if rerr != nil {
 				return nil, NewError(CodeRequestFailed, ErrorOptions{Message: "could not read " + path, Status: 502, Cause: rerr})
 			}
-			// An object that exists but is empty reads as nil: there is no JSON document in it.
-			if len(data) > 0 {
+			// An object that exists but is empty, or holds null, reads as nil: there is no document.
+			if t := bytes.TrimSpace(data); len(t) > 0 && string(t) != "null" {
 				var v T
 				if err := json.Unmarshal(data, &v); err != nil {
 					return nil, NewError(CodeInvalidInput, ErrorOptions{Message: path + " is not JSON", Cause: err})

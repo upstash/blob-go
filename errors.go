@@ -193,7 +193,10 @@ func ErrorFromStatus(status int, opts ErrorOptions) *Error {
 
 func (e *Error) Error() string {
 	if e.Message == "" {
-		return sentenceCase(defaultMessage[e.Code])
+		if m, ok := defaultMessage[e.Code]; ok {
+			return sentenceCase(m)
+		}
+		return sentenceCase(defaultMessage[CodeRequestFailed])
 	}
 	return e.Message
 }

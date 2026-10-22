@@ -2,6 +2,7 @@ package blob
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -376,5 +377,34 @@ func TestHandlerRound1Regressions(t *testing.T) {
 	status, out, _ := serve(h, "POST", "/", map[string]any{"phase": "end", "completionToken": out["completionToken"], "parts": []any{map[string]any{"n": 1, "etag": "x"}}})
 	if status != 500 || out["code"] != "request_failed" || !strings.Contains(logs.String(), "could not be encoded") {
 		t.Fatalf("unencodable data: %d %v", status, out)
+	}
+}
+
+func TestHandlerRound2Regressions(t *testing.T) {
+	f := newFake()
+	b := f.bucket(t)
+	before := func(a BeforeUploadArgs[int]) (BeforeUploadResult, error) {
+		return BeforeUploadResult{Path: "u/" + a.File.Name}, nil
+	}
+	if _, err := NewUploadHandler(UploadHandlerOptions[int]{Bucket: b, OnBeforeUpload: before, Routes: map[string]UploadRoute[int]{"a": {MaxSize: -5}}}); err == nil {
+		t.Fatal("a negative route MaxSize other than NoLimit was accepted")
+	}
+	completed := false
+	h, _ := NewUploadHandler(UploadHandlerOptions[int]{Bucket: b, OnBeforeUpload: before, Multipart: MultipartAlways,
+		OnUploadComplete: func(a UploadCompleteArgs[int]) (any, error) { completed = true; return nil, nil }})
+	_, out, _ := serve(h, "POST", "/", begin("m.bin", "", 10))
+	token := out["completionToken"]
+	part := out["upload"].(map[string]any)["parts"].([]any)[0].(map[string]any)
+	req, _ := http.NewRequest("PUT", part["url"].(string), strings.NewReader("0123456789"))
+	res, _ := f.client().Do(req)
+	res.Body.Close()
+	// The browser left: the request context is already cancelled, and 'end' still finishes.
+	raw, _ := json.Marshal(map[string]any{"phase": "end", "completionToken": token, "parts": []any{map[string]any{"n": 1, "etag": res.Header.Get("ETag")}}})
+	gone, cancel := context.WithCancel(context.Background())
+	cancel()
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, httptest.NewRequest("POST", "/", bytes.NewReader(raw)).WithContext(gone))
+	if w.Code != 200 || !completed || f.objects["u/m.bin"] == nil {
+		t.Fatalf("end after the browser left: %d %s", w.Code, w.Body)
 	}
 }

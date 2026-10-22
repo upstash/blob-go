@@ -355,10 +355,13 @@ func (h *UploadHandler[C]) mount(name string, route UploadRoute[C], fallback fun
 		}
 	}
 	maxSize := h.opts.MaxSize
-	if route.MaxSize > 0 {
+	switch {
+	case route.MaxSize > 0:
 		maxSize = route.MaxSize
-	} else if route.MaxSize < 0 {
+	case route.MaxSize == NoLimit:
 		maxSize = 0
+	case route.MaxSize < 0:
+		return nil, fmt.Errorf("blob: %s: MaxSize %d is negative; NoLimit clears the handler's", label, route.MaxSize)
 	}
 	// Resolved here, not per request: a bad option is a build error, not a 500 raised after
 	// OnBeforeUpload has already written the app's row.
@@ -524,9 +527,11 @@ func (m *mountedRoute[C]) dispatch(r *http.Request, ctx C, details *errorDetails
 	case "parts":
 		return m.parts(r, ctx, body, details)
 	case "end":
-		return m.end(r, ctx, body, details)
+		// Run to the end even if the browser leaves: a multipart completed and then abandoned is a
+		// stored object OnUploadComplete never saw. The browser counts on 'end' finishing without it.
+		return m.end(r.WithContext(context.WithoutCancel(r.Context())), ctx, body, details)
 	case "cancel":
-		return m.cancel(r, ctx, body, details)
+		return m.cancel(r.WithContext(context.WithoutCancel(r.Context())), ctx, body, details)
 	}
 	return nil, newErr(CodeInvalidInput, "unknown phase "+phase)
 }

@@ -603,3 +603,28 @@ func TestRound1Regressions(t *testing.T) {
 		t.Fatalf("%+v %v %q", put, err, sent)
 	}
 }
+
+func TestRound2Regressions(t *testing.T) {
+	f := newFake()
+	b := f.bucket(t)
+	ctx := context.Background()
+	f.objects["n.json"] = &fakeObject{data: []byte(" null\n"), headers: http.Header{}, etag: `"n"`}
+	if _, err := UpdateJSON(ctx, b, "n.json", func(prev *map[string]int) (map[string]int, error) {
+		if prev != nil {
+			t.Fatalf("JSON null reached fn as %v", *prev)
+		}
+		return map[string]int{"x": 1}, nil
+	}, nil); err != nil {
+		t.Fatal(err)
+	}
+	buf := bytes.NewBufferString("keep")
+	if _, err := b.Put(ctx, "buf", buf, nil); err != nil || buf.String() != "keep" {
+		t.Fatalf("a *bytes.Buffer was drained: %q %v", buf.String(), err)
+	}
+	if _, err := b.SignedReadURL(ctx, "x", &SignedReadURLOptions{ExpiresIn: -time.Second}); !HasCode(err, CodeInvalidInput) {
+		t.Fatal("negative ExpiresIn accepted")
+	}
+	if e := (&Error{Code: "custom"}); e.Error() != "Request failed" {
+		t.Fatalf("unknown code message: %q", e.Error())
+	}
+}

@@ -42,8 +42,8 @@ func resolveBody(body io.Reader) (resolvedBody, error) {
 	case nil:
 		return bytesBody(nil), nil
 	case *bytes.Buffer:
-		// Taken whole, so a retry can send it again.
-		return bytesBody(b.Next(b.Len())), nil
+		// Read in place, like the other replayable bodies, so a retry can send it again.
+		return bytesBody(b.Bytes()), nil
 	case *os.File:
 		if info, err := b.Stat(); err == nil && info.Mode().IsRegular() {
 			out := measure(b)
