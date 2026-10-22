@@ -245,6 +245,9 @@ func TestHandlerLifecycle(t *testing.T) {
 
 	// Refused in OnUploadComplete: deleted; OnError can remap.
 	status, out = post("file", begin("no.bin", "", 2), "alice")
+	if status != 200 {
+		t.Fatalf("begin: %d %v", status, out)
+	}
 	putParts(out["upload"].(map[string]any), []byte("no"))
 	status, out = post("file", map[string]any{"phase": "end", "completionToken": out["completionToken"], "parts": []any{map[string]any{"n": 1, "etag": "x"}}}, "alice")
 	if status != 403 || out["message"] != "Not today" || f.objects["u/no.bin"] != nil {
@@ -276,6 +279,9 @@ func TestHandlerLifecycle(t *testing.T) {
 	}
 
 	status, out = post("big", begin("c.bin", "", int64(len(data))), "alice")
+	if status != 200 {
+		t.Fatalf("begin: %d %v", status, out)
+	}
 	ctoken := out["completionToken"].(string)
 	if len(f.uploads) != 1 {
 		t.Fatalf("%d uploads open", len(f.uploads))
@@ -289,6 +295,9 @@ func TestHandlerLifecycle(t *testing.T) {
 
 	// A declared size the bytes do not match is refused and deleted.
 	status, out = post("file", begin("short.bin", "", 5), "alice")
+	if status != 200 {
+		t.Fatalf("begin: %d %v", status, out)
+	}
 	putParts(out["upload"].(map[string]any), []byte("abcde"))
 	f.objects["u/short.bin"].data = []byte("ab")
 	status, out = post("file", map[string]any{"phase": "end", "completionToken": out["completionToken"], "parts": []any{map[string]any{"n": 1, "etag": "x"}}}, "alice")

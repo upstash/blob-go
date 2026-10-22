@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"encoding/xml"
 	"errors"
 	"fmt"
 	"io"
@@ -170,8 +169,9 @@ type PutOptions struct {
 }
 
 // Put stores body at path. A *bytes.Reader, *strings.Reader, *bytes.Buffer, regular *os.File or
-// other io.ReaderAt that is an io.Seeker is measured and retried on a failed request; any other
-// reader needs PutOptions.Size or MaxSize, and goes up once. A failed multipart upload is reported
+// other io.ReaderAt that is an io.Seeker is measured, read in place and retried on a failed
+// request. Any other io.Seeker is measured and goes up once. Any other reader needs PutOptions.Size,
+// and then streams up once, or MaxSize, and then is buffered up to it and retried. A failed multipart upload is reported
 // once the read of a stream in progress returns, since an io.Reader cannot be interrupted.
 func (b *Bucket) Put(ctx context.Context, path string, body io.Reader, opts *PutOptions) (*CompletedBlob, error) {
 	if opts == nil {
@@ -554,29 +554,22 @@ func (b *Bucket) List(ctx context.Context, opts *ListOptions) (*ListPage, error)
 	if !ok(res) {
 		return nil, errorFromBody(res.StatusCode, text)
 	}
-	var doc struct {
-		Contents []struct {
-			Key          *string `xml:"Key"`
-			Size         int64   `xml:"Size"`
-			ETag         string  `xml:"ETag"`
-			LastModified string  `xml:"LastModified"`
-		} `xml:"Contents"`
-		IsTruncated           bool   `xml:"IsTruncated"`
-		NextContinuationToken string `xml:"NextContinuationToken"`
-	}
-	if err := xml.Unmarshal([]byte(text), &doc); err != nil {
-		return nil, NewError(CodeRequestFailed, ErrorOptions{Message: "storage answered the listing with an unreadable document", Status: 502, Cause: err})
-	}
-	page := &ListPage{Blobs: make([]BlobObject, 0, len(doc.Contents))}
-	for _, c := range doc.Contents {
-		if c.Key == nil {
+	contents := xmlBlocks(text, "Contents")
+	page := &ListPage{Blobs: make([]BlobObject, 0, len(contents))}
+	for _, c := range contents {
+		key, hasKey := xmlTag(c, "Key")
+		if !hasKey {
 			continue
 		}
-		modified, _ := time.Parse(time.RFC3339Nano, c.LastModified)
-		page.Blobs = append(page.Blobs, b.r2.blobObject(*c.Key, c.Size, c.ETag, modified))
+		size, err := strconv.ParseInt(strings.TrimSpace(xmlText(c, "Size")), 10, 64)
+		if err != nil {
+			return nil, NewError(CodeRequestFailed, ErrorOptions{Message: "storage answered the listing with an unreadable document", Status: 502, Cause: err})
+		}
+		modified, _ := time.Parse(time.RFC3339Nano, xmlText(c, "LastModified"))
+		page.Blobs = append(page.Blobs, b.r2.blobObject(key, size, xmlText(c, "ETag"), modified))
 	}
-	if doc.IsTruncated && doc.NextContinuationToken != "" {
-		page.Cursor = doc.NextContinuationToken
+	if next := xmlText(text, "NextContinuationToken"); xmlText(text, "IsTruncated") == "true" && next != "" {
+		page.Cursor = next
 	}
 	return page, nil
 }
@@ -829,13 +822,25 @@ func (b *Bucket) deleteBatch(ctx context.Context, paths []string) ([]string, err
 	}
 	var body strings.Builder
 	body.WriteString("<Delete>")
+	batched := 0
 	for _, p := range paths {
 		if _, err := encodeKey(p); err != nil {
 			return nil, err
 		}
+		if !xmlCarries(p) {
+			// A request body cannot name it, so it goes alone.
+			if err := b.Delete(ctx, p); err != nil {
+				return nil, err
+			}
+			continue
+		}
 		body.WriteString("<Object><Key>" + escapeXML(p) + "</Key></Object>")
+		batched++
 	}
 	body.WriteString("</Delete>")
+	if batched == 0 {
+		return nil, nil
+	}
 	res, err := b.r2.fetch(ctx, r2Request{method: "POST", query: map[string]string{"delete": ""}, headers: map[string]string{"content-type": "application/xml"}, body: []byte(body.String())})
 	if err != nil {
 		return nil, err
@@ -847,24 +852,19 @@ func (b *Bucket) deleteBatch(ctx context.Context, paths []string) ([]string, err
 	if !ok(res) {
 		return nil, errorFromBody(res.StatusCode, text)
 	}
-	var doc struct {
-		Errors []struct {
-			Key *string `xml:"Key"`
-		} `xml:"Error"`
-	}
-	_ = xml.Unmarshal([]byte(text), &doc)
 	// S3 answers 200 with errors inside; a survivor is the truth, so ask again rather than trust the list.
 	var survivors []string
-	for _, e := range doc.Errors {
-		if e.Key == nil {
+	for _, e := range xmlBlocks(text, "Error") {
+		key, hasKey := xmlTag(e, "Key")
+		if !hasKey {
 			continue
 		}
-		exists, err := b.Exists(ctx, *e.Key)
+		exists, err := b.Exists(ctx, key)
 		if err != nil {
 			return nil, err
 		}
 		if exists {
-			survivors = append(survivors, *e.Key)
+			survivors = append(survivors, key)
 		}
 	}
 	return survivors, nil
@@ -1006,7 +1006,7 @@ func (b *Bucket) Copy(ctx context.Context, from, to string, opts *CopyOptions) (
 	if !ok(res) {
 		return nil, errorFromBody(res.StatusCode, text)
 	}
-	if xmlTag(text, "Code") != "" {
+	if xmlText(text, "Code") != "" {
 		return nil, errorFromBody(500, text)
 	}
 	head, err := b.r2.head(ctx, to)

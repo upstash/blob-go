@@ -567,3 +567,42 @@ func TestLiveUploadHandler(t *testing.T) {
 		t.Fatalf("unknown route: %d %v", status, out)
 	}
 }
+
+// Keys XML reads back differently, or cannot carry at all, still list and delete as written.
+func TestLiveOddKeys(t *testing.T) {
+	b, p := liveBucket(t, "UPSTASH_BLOB_PUBLIC_TOKEN")
+	ctx := context.Background()
+	keys := []string{p + "a\x01b", p + "c\rd", p + "e\r\nf", p + "g&<h>'\"", p + "tab\tx"}
+	for _, k := range keys {
+		if _, err := b.Put(ctx, k, strings.NewReader("x"), nil); err != nil {
+			t.Fatalf("put %q: %v", k, err)
+		}
+	}
+	page, err := b.List(ctx, &ListOptions{Prefix: p})
+	if err != nil {
+		t.Fatal(err)
+	}
+	listed := map[string]bool{}
+	for _, o := range page.Blobs {
+		listed[o.Path] = true
+	}
+	for _, k := range keys {
+		if !listed[k] {
+			t.Fatalf("%q not listed as written: %q", k, page.Blobs)
+		}
+	}
+	if err := b.DeleteMany(ctx, keys[1:]); err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range keys[1:] {
+		if ok, err := b.Exists(ctx, k); err != nil || ok {
+			t.Fatalf("%q survived DeleteMany: %v %v", k, ok, err)
+		}
+	}
+	if err := b.DeletePrefix(ctx, p); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := b.Exists(ctx, keys[0]); err != nil || ok {
+		t.Fatalf("%q survived DeletePrefix: %v %v", keys[0], ok, err)
+	}
+}

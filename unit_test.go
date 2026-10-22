@@ -631,3 +631,20 @@ func TestRound2Regressions(t *testing.T) {
 		t.Fatal("negative upload ExpiresIn accepted")
 	}
 }
+
+func TestXMLReading(t *testing.T) {
+	doc := "<R><Contents><Key>a\rb&amp;&#13;&#x41;&lt;&bogus;</Key></Contents><Contents><Key></Key></Contents><IsTruncated>false</IsTruncated></R>"
+	blocks := xmlBlocks(doc, "Contents")
+	if k, _ := xmlTag(blocks[0], "Key"); len(blocks) != 2 || k != "a\rb&\rA<&bogus;" {
+		t.Fatalf("%q %q", blocks, k)
+	}
+	if k, ok := xmlTag(blocks[1], "Key"); !ok || k != "" {
+		t.Fatal("an empty element is present")
+	}
+	if _, ok := xmlTag(doc, "NextContinuationToken"); ok {
+		t.Fatal("a missing element is absent")
+	}
+	if escapeXML("a\r&<>") != "a&#13;&amp;&lt;&gt;" || xmlCarries("a\x01") || !xmlCarries("a\t\r\nb") {
+		t.Fatal("escape")
+	}
+}

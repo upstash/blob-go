@@ -50,10 +50,6 @@ func presignableKey(path string) error {
 	return nil
 }
 
-func escapeXML(s string) string {
-	return strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;").Replace(s)
-}
-
 var headerNameRE = regexp.MustCompile("^[A-Za-z0-9!#$%&'*+.^_`|~-]+$")
 
 // metaHeaders turns metadata into x-amz-meta-* headers. Keys must be lowercase, since storage hands

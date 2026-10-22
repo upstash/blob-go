@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"encoding/xml"
 	"errors"
 	"fmt"
 	"io"
@@ -476,13 +475,11 @@ func (r *r2) createMultipart(ctx context.Context, path string, headers map[strin
 	if !ok(res) {
 		return "", errorFromBody(res.StatusCode, text)
 	}
-	var doc struct {
-		UploadID string `xml:"UploadId"`
-	}
-	if xml.Unmarshal([]byte(text), &doc) != nil || doc.UploadID == "" {
+	uploadID := xmlText(text, "UploadId")
+	if uploadID == "" {
 		return "", NewError(CodeRequestFailed, ErrorOptions{Message: "CreateMultipartUpload returned no upload id", Status: 502})
 	}
-	return doc.UploadID, nil
+	return uploadID, nil
 }
 
 type landedPart struct {
@@ -509,24 +506,18 @@ func (r *r2) listParts(ctx context.Context, path, uploadID string) ([]landedPart
 		if !ok(res) {
 			return nil, errorFromBody(res.StatusCode, text)
 		}
-		var doc struct {
-			Parts []struct {
-				PartNumber int    `xml:"PartNumber"`
-				ETag       string `xml:"ETag"`
-			} `xml:"Part"`
-			IsTruncated          bool   `xml:"IsTruncated"`
-			NextPartNumberMarker string `xml:"NextPartNumberMarker"`
+		for _, p := range xmlBlocks(text, "Part") {
+			n, err := strconv.Atoi(strings.TrimSpace(xmlText(p, "PartNumber")))
+			if err != nil {
+				return nil, NewError(CodeRequestFailed, ErrorOptions{Message: "storage answered ListParts with an unreadable document", Status: 502, Cause: err})
+			}
+			out = append(out, landedPart{N: n, ETag: xmlText(p, "ETag")})
 		}
-		if err := xml.Unmarshal([]byte(text), &doc); err != nil {
-			return nil, NewError(CodeRequestFailed, ErrorOptions{Message: "storage answered ListParts with an unreadable document", Status: 502, Cause: err})
-		}
-		for _, p := range doc.Parts {
-			out = append(out, landedPart{N: p.PartNumber, ETag: p.ETag})
-		}
-		if !doc.IsTruncated || doc.NextPartNumberMarker == "" || doc.NextPartNumberMarker == marker {
+		next := xmlText(text, "NextPartNumberMarker")
+		if xmlText(text, "IsTruncated") != "true" || next == "" || next == marker {
 			return out, nil
 		}
-		marker = doc.NextPartNumberMarker
+		marker = next
 	}
 }
 
@@ -555,30 +546,20 @@ func (r *r2) listMultipartUploads(ctx context.Context, prefix string) ([]Multipa
 		if !ok(res) {
 			return nil, errorFromBody(res.StatusCode, text)
 		}
-		var doc struct {
-			Uploads []struct {
-				Key       *string `xml:"Key"`
-				UploadID  *string `xml:"UploadId"`
-				Initiated string  `xml:"Initiated"`
-			} `xml:"Upload"`
-			IsTruncated        bool   `xml:"IsTruncated"`
-			NextKeyMarker      string `xml:"NextKeyMarker"`
-			NextUploadIDMarker string `xml:"NextUploadIdMarker"`
-		}
-		if err := xml.Unmarshal([]byte(text), &doc); err != nil {
-			return nil, NewError(CodeRequestFailed, ErrorOptions{Message: "storage answered ListMultipartUploads with an unreadable document", Status: 502, Cause: err})
-		}
-		for _, u := range doc.Uploads {
-			if u.Key == nil || u.UploadID == nil {
+		for _, u := range xmlBlocks(text, "Upload") {
+			key, hasKey := xmlTag(u, "Key")
+			uploadID, hasID := xmlTag(u, "UploadId")
+			if !hasKey || !hasID {
 				continue
 			}
-			initiated, _ := time.Parse(time.RFC3339Nano, u.Initiated)
-			out = append(out, MultipartUpload{Path: *u.Key, UploadID: *u.UploadID, InitiatedAt: initiated})
+			initiated, _ := time.Parse(time.RFC3339Nano, xmlText(u, "Initiated"))
+			out = append(out, MultipartUpload{Path: key, UploadID: uploadID, InitiatedAt: initiated})
 		}
-		if !doc.IsTruncated || doc.NextKeyMarker == "" || (doc.NextKeyMarker == keyMarker && doc.NextUploadIDMarker == idMarker) {
+		nextKey, nextID := xmlText(text, "NextKeyMarker"), xmlText(text, "NextUploadIdMarker")
+		if xmlText(text, "IsTruncated") != "true" || nextKey == "" || (nextKey == keyMarker && nextID == idMarker) {
 			return out, nil
 		}
-		keyMarker, idMarker = doc.NextKeyMarker, doc.NextUploadIDMarker
+		keyMarker, idMarker = nextKey, nextID
 	}
 }
 
@@ -603,14 +584,10 @@ func (r *r2) completeMultipart(ctx context.Context, path, uploadID string, parts
 		return "", errorFromBody(res.StatusCode, text)
 	}
 	// A 200 can still carry an error document.
-	if xmlTag(text, "Code") != "" {
+	if xmlText(text, "Code") != "" {
 		return "", errorFromBody(500, text)
 	}
-	var doc struct {
-		ETag string `xml:"ETag"`
-	}
-	_ = xml.Unmarshal([]byte(text), &doc)
-	return doc.ETag, nil
+	return xmlText(text, "ETag"), nil
 }
 
 func (r *r2) abortMultipart(ctx context.Context, path, uploadID string) error {
@@ -625,24 +602,6 @@ func (r *r2) abortMultipart(ctx context.Context, path, uploadID string) error {
 	return nil
 }
 
-// xmlTag is the text of the first <name> element, entities decoded; "" when there is none.
-var xmlTags = map[string]*regexp.Regexp{
-	"Code":    regexp.MustCompile(`<Code>([\s\S]*?)</Code>`),
-	"Message": regexp.MustCompile(`<Message>([\s\S]*?)</Message>`),
-}
-
-func xmlTag(doc, name string) string {
-	m := xmlTags[name].FindStringSubmatch(doc)
-	if m == nil {
-		return ""
-	}
-	var s string
-	if xml.Unmarshal([]byte("<x>"+m[1]+"</x>"), &s) != nil {
-		return m[1]
-	}
-	return s
-}
-
 func errorFromResponse(res *http.Response) error {
 	text, _ := readXML(res)
 	return errorFromBody(res.StatusCode, text)
@@ -651,8 +610,8 @@ func errorFromResponse(res *http.Response) error {
 // errorFromBody maps a storage answer to an *Error. Storage's own message is for whoever debugs
 // the app, not for a user it would be shown to, so it rides on the cause.
 func errorFromBody(status int, doc string) *Error {
-	code := xmlTag(doc, "Code")
-	message := xmlTag(doc, "Message")
+	code := xmlText(doc, "Code")
+	message := xmlText(doc, "Message")
 	switch {
 	case status == 404 || code == "NoSuchKey" || code == "NoSuchUpload":
 		return NewError(CodeNotFound, ErrorOptions{})

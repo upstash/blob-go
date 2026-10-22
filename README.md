@@ -30,8 +30,9 @@ blob.UpdateJSON(ctx, bucket, "u/7.json", func(prev *Settings) (Settings, error) 
 
 - `Put` takes any `io.Reader`. A `*bytes.Reader`, `*strings.Reader`, `*bytes.Buffer`, regular
   `*os.File` or other `io.ReaderAt` that is an `io.Seeker` is measured, read in place, and retried
-  on a failed request; any other reader needs `Size` or `MaxSize` and goes up once. A file's content type comes from its extension, else
-  `application/octet-stream`.
+  on a failed request. Any other `io.Seeker` is measured and goes up once. Any other reader needs
+  `Size`, and streams up once, or `MaxSize`, and is buffered up to it and retried. A file's content
+  type comes from its extension, else `application/octet-stream`.
 - `ContentTypes: []string{"image/*"}` checks the declared type and the body's first bytes;
   `MaxSize: 20*blob.MB` refuses anything larger, while streaming too.
 - A body over 16 MB goes up as multipart, four parts at a time; `Multipart: blob.MultipartOver(100*blob.MB)`,
