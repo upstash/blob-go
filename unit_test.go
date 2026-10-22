@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -570,7 +571,7 @@ func TestPrivateVisibility(t *testing.T) {
 	}
 }
 
-func TestRound1Regressions(t *testing.T) {
+func TestTrimmedTokenAndFileRetry(t *testing.T) {
 	// A token read from a file keeps working.
 	f := newFake()
 	resetCredentialCaches()
@@ -604,7 +605,7 @@ func TestRound1Regressions(t *testing.T) {
 	}
 }
 
-func TestRound2Regressions(t *testing.T) {
+func TestPutAndUpdateEdges(t *testing.T) {
 	f := newFake()
 	b := f.bucket(t)
 	ctx := context.Background()
@@ -649,7 +650,7 @@ func TestXMLReading(t *testing.T) {
 	}
 }
 
-func TestRound5Regressions(t *testing.T) {
+func TestMoveOntoItselfAndUnknownOutcomes(t *testing.T) {
 	f := newFake()
 	b := f.bucket(t)
 	ctx := context.Background()
@@ -701,6 +702,38 @@ func TestRound5Regressions(t *testing.T) {
 	// Without a lost attempt a 412 is still the plain refusal.
 	if _, err := b.Put(ctx, "new", strings.NewReader("again"), &PutOptions{NoOverwrite: true}); !HasCode(err, CodeAlreadyExists) {
 		t.Fatalf("plain NoOverwrite: %v", err)
+	}
+	// A failed dial applied nothing, so the 412 after it is the plain refusal.
+	dials := 0
+	dial := f.bucket(t, func(o *Options) {
+		o.HTTPClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			if req.Method == "PUT" && dials == 0 {
+				dials++
+				return nil, &net.OpError{Op: "dial", Net: "tcp", Err: errors.New("connection refused")}
+			}
+			return f.RoundTrip(req)
+		})}
+	})
+	if _, err := dial.Put(ctx, "new", strings.NewReader("x"), &PutOptions{NoOverwrite: true}); !HasCode(err, CodeAlreadyExists) {
+		t.Fatalf("NoOverwrite after a failed dial: %v", err)
+	}
+	// A dropped connection to the credential service is retried, then named, for Put as for fetch.
+	flaky := func(drops int) *Bucket {
+		return f.bucket(t, func(o *Options) {
+			o.HTTPClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				if req.URL.Path == "/v1/credentials" && drops > 0 {
+					drops--
+					return nil, errors.New("connection reset")
+				}
+				return f.RoundTrip(req)
+			})}
+		})
+	}
+	if _, err := flaky(1).Put(ctx, "flaky", strings.NewReader("x"), nil); err != nil {
+		t.Fatalf("Put after a dropped mint: %v", err)
+	}
+	if _, err := flaky(100).Put(ctx, "flaky", strings.NewReader("x"), nil); !HasCode(err, CodeRequestFailed) || err.Error() != "Could not reach the Upstash credential service" {
+		t.Fatalf("Put with the credential service down: %v", err)
 	}
 	// Storage out of reach is named as storage, not as the credential service.
 	unreachable := f.bucket(t, func(o *Options) {

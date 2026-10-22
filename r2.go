@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"net"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -68,12 +69,37 @@ type r2Request struct {
 
 func (q *r2Request) streaming() bool { return q.stream != nil }
 
-func (r *r2) credentials(ctx context.Context) (*tempCredentials, error) {
+// credentialsOnce is one try at a credential. A dropped connection to the credential service is a
+// plain error, for fetch to retry along with the request it was minting for.
+func (r *r2) credentialsOnce(ctx context.Context) (*tempCredentials, error) {
 	c, err := r.creds.get(ctx, r.client, r.retry)
 	if err == nil {
 		r.vis.Store(c.Visibility)
 	}
 	return c, err
+}
+
+// credentials is a credential for a caller outside fetch, with a dropped connection retried the
+// way fetch would.
+func (r *r2) credentials(ctx context.Context) (*tempCredentials, error) {
+	for attempt := 1; ; attempt++ {
+		c, err := r.credentialsOnce(ctx)
+		if err == nil {
+			return c, nil
+		}
+		if _, ok := asBlobError(err); ok {
+			return nil, err
+		}
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		if attempt >= r.attempts() {
+			return nil, NewError(CodeRequestFailed, ErrorOptions{Message: "could not reach the Upstash credential service", Status: 502, Cause: err})
+		}
+		if err := sleep(ctx, r.wait(attempt, "")); err != nil {
+			return nil, err
+		}
+	}
 }
 
 // visibility is what the credentials response said, else public. Read after credentials() has
@@ -173,7 +199,9 @@ func (r *r2) fetch(ctx context.Context, q r2Request) (*http.Response, error) {
 			if err := sleep(ctx, r.wait(attempt, "")); err != nil {
 				return nil, err
 			}
-			if q.resent != nil && signedWith != nil {
+			// A failed dial never reached storage, so it cannot have applied anything.
+			var op *net.OpError
+			if q.resent != nil && signedWith != nil && !(errors.As(err, &op) && op.Op == "dial") {
 				*q.resent = true
 			}
 			continue
@@ -214,7 +242,7 @@ func (r *r2) fetch(ctx context.Context, q r2Request) (*http.Response, error) {
 }
 
 func (r *r2) send(ctx context.Context, q r2Request) (*http.Response, *tempCredentials, error) {
-	c, err := r.credentials(ctx)
+	c, err := r.credentialsOnce(ctx)
 	if err != nil {
 		return nil, nil, err
 	}

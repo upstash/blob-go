@@ -346,7 +346,7 @@ func TestHandlerConfigErrors(t *testing.T) {
 	}
 }
 
-func TestHandlerRound1Regressions(t *testing.T) {
+func TestHandlerErrorAnswers(t *testing.T) {
 	f := newFake()
 	b := f.bucket(t)
 	var logs bytes.Buffer
@@ -389,7 +389,7 @@ func TestHandlerRound1Regressions(t *testing.T) {
 	}
 }
 
-func TestHandlerRound2Regressions(t *testing.T) {
+func TestHandlerRouteMaxSizeAndDisconnect(t *testing.T) {
 	f := newFake()
 	b := f.bucket(t)
 	before := func(a BeforeUploadArgs[int]) (BeforeUploadResult, error) {
@@ -423,7 +423,7 @@ type nilStatus struct{ code int }
 func (e *nilStatus) Error() string   { return "nil status" }
 func (e *nilStatus) StatusCode() int { return e.code }
 
-func TestHandlerRound3Regressions(t *testing.T) {
+func TestHandlerTypedNilErrors(t *testing.T) {
 	f := newFake()
 	b := f.bucket(t)
 	var logs bytes.Buffer
