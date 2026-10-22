@@ -331,9 +331,3 @@ func credentialCacheFor(token string, telemetry bool) *credentialCache {
 	}
 	return c
 }
-
-func resetCredentialCaches() {
-	cachesMu.Lock()
-	defer cachesMu.Unlock()
-	caches = map[cacheKey]*credentialCache{}
-}

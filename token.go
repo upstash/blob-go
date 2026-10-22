@@ -43,11 +43,3 @@ func decodeToken(token string) (decodedToken, error) {
 		hashForDomain: string(raw[6+idLen+pwLen:]),
 	}, nil
 }
-
-func encodeToken(bucketID, password, hashForDomain string, flags byte) string {
-	out := []byte{tokenVersion, flags, byte(len(bucketID)), byte(len(password) >> 8), byte(len(password)), byte(len(hashForDomain))}
-	out = append(out, bucketID...)
-	out = append(out, password...)
-	out = append(out, hashForDomain...)
-	return base64.RawURLEncoding.EncodeToString(out)
-}

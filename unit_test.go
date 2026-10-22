@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -566,5 +567,39 @@ func TestPrivateVisibility(t *testing.T) {
 	put, err := b.Put(context.Background(), "s", strings.NewReader("s"), nil)
 	if err != nil || put.URL != "" || f.objects["s"].headers.Get("Cache-Control") != "private, max-age=3600" {
 		t.Fatalf("%+v %v", put, err)
+	}
+}
+
+func TestRound1Regressions(t *testing.T) {
+	// A token read from a file keeps working.
+	f := newFake()
+	resetCredentialCaches()
+	b, err := NewBucketWith(Options{Token: encodeToken("bucket-1", "pw-secret", "abc123", 0) + "\n", HTTPClient: f.client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.Exists(context.Background(), "x"); err != nil {
+		t.Fatal("a token with a trailing newline:", err)
+	}
+	// A file body retried after a 503 is sent whole, from its own reader.
+	path := t.TempDir() + "/body.txt"
+	if err := os.WriteFile(path, []byte("0123456789"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	file, _ := os.Open(path)
+	defer file.Close()
+	_, _ = file.Seek(2, io.SeekStart)
+	fails := 1
+	f.hook = func(req *http.Request, body []byte) *http.Response {
+		if req.Method == "PUT" && fails > 0 {
+			fails--
+			return respond(503, "")
+		}
+		return nil
+	}
+	put, err := b.Put(context.Background(), "f.txt", file, nil)
+	sent := f.bodies["PUT acct.r2.cloudflarestorage.com/bucket-1/f.txt"]
+	if err != nil || put.Size != 8 || put.ContentType != "text/plain; charset=utf-8" || len(sent) != 2 || string(sent[1]) != "23456789" {
+		t.Fatalf("%+v %v %q", put, err, sent)
 	}
 }

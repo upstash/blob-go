@@ -16,63 +16,66 @@ type resolvedBody struct {
 	// -1 when the length is unknown up front.
 	size        int64
 	contentType string
-	// Non-nil when the reader can be sent again from where it started.
-	rewind func() error
+	// Set when the body can be read again from start: every attempt gets its own reader over it,
+	// since the transport may still be reading the previous attempt's after Do returns.
+	ra    io.ReaderAt
+	start int64
+}
+
+func (b resolvedBody) replayable() bool { return b.ra != nil }
+
+// open is a fresh reader over a replayable body, or the one-shot reader.
+func (b resolvedBody) open() io.Reader {
+	if b.ra != nil {
+		return io.NewSectionReader(b.ra, b.start, b.size)
+	}
+	return b.r
+}
+
+type readerAtSeeker interface {
+	io.ReaderAt
+	io.Seeker
 }
 
 func resolveBody(body io.Reader) (resolvedBody, error) {
 	switch b := body.(type) {
 	case nil:
-		return resolvedBody{r: bytes.NewReader(nil), size: 0}, nil
+		return bytesBody(nil), nil
 	case *bytes.Buffer:
 		// Taken whole, so a retry can send it again.
-		data := b.Next(b.Len())
-		return bytesBody(data), nil
+		return bytesBody(b.Next(b.Len())), nil
 	case *os.File:
 		if info, err := b.Stat(); err == nil && info.Mode().IsRegular() {
-			if out, ok := seekableBody(b); ok {
-				out.contentType = mime.TypeByExtension(filepath.Ext(b.Name()))
-				return out, nil
-			}
-		}
-		return resolvedBody{r: b, size: -1}, nil
-	case io.ReadSeeker:
-		if out, ok := seekableBody(b); ok {
+			out := measure(b)
+			out.contentType = mime.TypeByExtension(filepath.Ext(b.Name()))
 			return out, nil
 		}
 		return resolvedBody{r: b, size: -1}, nil
+	case io.ReadSeeker:
+		return measure(b), nil
 	}
 	return resolvedBody{r: body, size: -1}, nil
 }
 
 func bytesBody(data []byte) resolvedBody {
-	r := bytes.NewReader(data)
-	return resolvedBody{r: r, size: int64(len(data)), rewind: func() error {
-		_, err := r.Seek(0, io.SeekStart)
-		return err
-	}}
+	return resolvedBody{size: int64(len(data)), ra: bytes.NewReader(data)}
 }
 
-// seekableBody sends what is left from the current offset, and can rewind to it. ok is false for
-// a seeker that cannot measure itself, which is then read as a plain stream.
-func seekableBody(s io.ReadSeeker) (resolvedBody, bool) {
+// measure sizes a seeker from its current offset to its end. One that can also ReadAt is
+// replayable; one that cannot measure itself is read as a plain stream.
+func measure(s io.ReadSeeker) resolvedBody {
 	start, err := s.Seek(0, io.SeekCurrent)
 	if err != nil {
-		return resolvedBody{}, false
+		return resolvedBody{r: s, size: -1}
 	}
 	end, err := s.Seek(0, io.SeekEnd)
-	if err != nil || end < start {
-		_, _ = s.Seek(start, io.SeekStart)
-		return resolvedBody{}, false
+	if _, serr := s.Seek(start, io.SeekStart); err != nil || serr != nil || end < start {
+		return resolvedBody{r: s, size: -1}
 	}
-	rewind := func() error {
-		_, err := s.Seek(start, io.SeekStart)
-		return err
+	if ra, ok := s.(readerAtSeeker); ok {
+		return resolvedBody{r: s, size: end - start, ra: ra, start: start}
 	}
-	if rewind() != nil {
-		return resolvedBody{}, false
-	}
-	return resolvedBody{r: s, size: end - start, rewind: rewind}, true
+	return resolvedBody{r: s, size: end - start}
 }
 
 func readAll(r io.Reader, maxSize int64) ([]byte, error) {
@@ -86,22 +89,18 @@ func readAll(r io.Reader, maxSize int64) ([]byte, error) {
 	return data, nil
 }
 
-// peek reads the leading bytes a type check looks at, and a reader that replays them ahead of the
-// rest. A body that can rewind is rewound instead, so it stays retriable.
+// peek reads the leading bytes a type check looks at. A replayable body is read at its start and
+// left as it was; a stream comes back as a reader that replays them ahead of the rest.
 func peek(b resolvedBody) ([]byte, resolvedBody, error) {
 	head := make([]byte, sniffBytes)
-	n, err := io.ReadFull(b.r, head)
+	n, err := io.ReadFull(b.open(), head)
 	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
 		return nil, b, err
 	}
 	head = head[:n]
-	if b.rewind != nil {
-		if err := b.rewind(); err != nil {
-			return nil, b, err
-		}
-		return head, b, nil
+	if !b.replayable() {
+		b.r = io.MultiReader(bytes.NewReader(head), b.r)
 	}
-	b.r = io.MultiReader(bytes.NewReader(head), b.r)
 	return head, b, nil
 }
 

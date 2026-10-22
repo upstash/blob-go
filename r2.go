@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -44,6 +45,9 @@ type r2 struct {
 	retry         retryPolicy
 	creds         *credentialCache
 	client        *http.Client
+	// The visibility the last credential this bucket fetched carried. Kept here rather than read off
+	// the shared cache, which another request can empty between a fetch and the read.
+	vis atomic.Value
 }
 
 type r2Request struct {
@@ -52,24 +56,29 @@ type r2Request struct {
 	path    string
 	query   map[string]string
 	headers map[string]string
-	// At most one of body and stream. A stream with no rewind is sent once and never retried.
+	// At most one of body, stream and open. A stream is sent once and never retried; open hands
+	// every attempt its own reader, since the transport may still be reading the last one.
 	body   []byte
 	stream io.Reader
+	open   func() io.Reader
 	length int64
-	rewind func() error
 }
 
-func (q *r2Request) streaming() bool { return q.stream != nil && q.rewind == nil }
+func (q *r2Request) streaming() bool { return q.stream != nil }
 
 func (r *r2) credentials(ctx context.Context) (*tempCredentials, error) {
-	return r.creds.get(ctx, r.client, r.retry)
+	c, err := r.creds.get(ctx, r.client, r.retry)
+	if err == nil {
+		r.vis.Store(c.Visibility)
+	}
+	return c, err
 }
 
 // visibility is what the credentials response said, else public. Read after credentials() has
 // resolved, which every request does before it writes a header or builds a BlobObject.
 func (r *r2) visibility() string {
-	if c := r.creds.peek(); c != nil && c.Visibility != "" {
-		return c.Visibility
+	if v, _ := r.vis.Load().(string); v != "" {
+		return v
 	}
 	return "public"
 }
@@ -133,7 +142,7 @@ func (r *r2) wait(attempt int, retryAfter string) time.Duration {
 
 // fetch sends one signed request. A 5xx, a 429 and a dropped connection are retried for the verbs
 // that can be sent twice safely; multipart complete and the batch delete are POSTs and are not. A
-// stream that cannot be rewound is never retried: it has already been read once.
+// stream is never retried: it has already been read once.
 func (r *r2) fetch(ctx context.Context, q r2Request) (*http.Response, error) {
 	streaming := q.streaming()
 	attempts := 1
@@ -142,11 +151,6 @@ func (r *r2) fetch(ctx context.Context, q r2Request) (*http.Response, error) {
 	}
 	refreshed := false
 	for attempt := 1; ; attempt++ {
-		if attempt > 1 && q.rewind != nil {
-			if err := q.rewind(); err != nil {
-				return nil, err
-			}
-		}
 		res, signedWith, err := r.send(ctx, q)
 		if err != nil {
 			// An *Error here came from minting a credential, which has its own retry policy and its
@@ -212,6 +216,8 @@ func (r *r2) send(ctx context.Context, q r2Request) (*http.Response, *tempCreden
 	switch {
 	case q.stream != nil:
 		body, length = q.stream, q.length
+	case q.open != nil:
+		body, length = q.open(), q.length
 	case q.body != nil:
 		body, length = bytes.NewReader(q.body), int64(len(q.body))
 	}
@@ -221,7 +227,7 @@ func (r *r2) send(ctx context.Context, q r2Request) (*http.Response, *tempCreden
 	}
 	// The URL is rebuilt from its string, which can re-encode the path; the signature is over RawPath.
 	req.URL = u
-	if q.stream != nil {
+	if q.stream != nil || q.open != nil {
 		// NewRequest only sizes the readers it knows; a wrapped stream would go chunked.
 		req.ContentLength = length
 		if length == 0 {

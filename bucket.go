@@ -58,6 +58,8 @@ func NewBucketFromEnv() (*Bucket, error) {
 
 // NewBucketWith returns a client configured by options.
 func NewBucketWith(options Options) (*Bucket, error) {
+	// A token read from a file carries its newline, which no header can.
+	options.Token = strings.TrimSpace(options.Token)
 	if options.Token == "" {
 		return nil, errors.New("blob: a token is required")
 	}
@@ -167,8 +169,9 @@ type PutOptions struct {
 }
 
 // Put stores body at path. A *bytes.Reader, *strings.Reader, *bytes.Buffer, regular *os.File or
-// other io.ReadSeeker is measured and retried on a failed request; any other reader needs
-// PutOptions.Size or MaxSize, and goes up once.
+// other io.ReaderAt that is an io.Seeker is measured and retried on a failed request; any other
+// reader needs PutOptions.Size or MaxSize, and goes up once. A failed multipart upload is reported
+// once the read of a stream in progress returns, since an io.Reader cannot be interrupted.
 func (b *Bucket) Put(ctx context.Context, path string, body io.Reader, opts *PutOptions) (*CompletedBlob, error) {
 	if opts == nil {
 		opts = &PutOptions{}
@@ -260,7 +263,7 @@ func (b *Bucket) Put(ctx context.Context, path string, body io.Reader, opts *Put
 			return nil, err
 		}
 		if wants && !conditional {
-			return b.putMultipart(ctx, path, body0.r, size, maxSize, objectHeaders, contentType)
+			return b.putMultipart(ctx, path, body0.open(), size, maxSize, objectHeaders, contentType)
 		}
 	}
 
@@ -276,17 +279,11 @@ func (b *Bucket) Put(ctx context.Context, path string, body io.Reader, opts *Put
 	if size == 0 {
 		q.body = []byte{}
 	} else {
-		q.stream = &sizedReader{r: body0.r, size: size, maxSize: maxSize}
 		q.length = size
-		if body0.rewind != nil {
-			rewind := body0.rewind
-			q.rewind = func() error {
-				if err := rewind(); err != nil {
-					return err
-				}
-				q.stream.(*sizedReader).seen = 0
-				return nil
-			}
+		if body0.replayable() {
+			q.open = func() io.Reader { return &sizedReader{r: body0.open(), size: size, maxSize: maxSize} }
+		} else {
+			q.stream = &sizedReader{r: body0.r, size: size, maxSize: maxSize}
 		}
 	}
 	res, err := b.r2.fetch(ctx, q)
@@ -660,7 +657,9 @@ type SignedUploadURLOptions struct {
 type SignedUploadURL struct {
 	URL string
 	// Headers are sent verbatim with the PUT. They are part of the signature, so anything the
-	// caller changes, drops or adds to them is a 403.
+	// caller changes, drops or adds to them is a 403. With net/http, content-length is not a
+	// header: set Request.ContentLength to the size instead, which a *bytes.Reader body does by
+	// itself and an *os.File body does not.
 	Headers   map[string]string
 	ExpiresAt time.Time
 }

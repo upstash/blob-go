@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"math"
 	"net/http"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -241,13 +242,16 @@ func NewUploadHandler[C any](opts UploadHandlerOptions[C]) (*UploadHandler[C], e
 		if envBucket != nil {
 			return envBucket, nil
 		}
+		where := "NewUploadHandler has no Bucket"
+		if named {
+			where = fmt.Sprintf("upload route %q has no Bucket", name)
+		}
+		if os.Getenv(TokenEnv) == "" {
+			return nil, fmt.Errorf("blob: %s and %s is not set: set it, or pass Bucket", where, TokenEnv)
+		}
 		b, err := NewBucketFromEnv()
 		if err != nil {
-			where := "NewUploadHandler has no Bucket"
-			if named {
-				where = fmt.Sprintf("upload route %q has no Bucket", name)
-			}
-			return nil, fmt.Errorf("blob: %s and %s is not set: set it, or pass Bucket", where, TokenEnv)
+			return nil, fmt.Errorf("blob: %s, and %s did not work: %w", where, TokenEnv, err)
 		}
 		envBucket = b
 		return b, nil
@@ -456,7 +460,7 @@ func constraintsDocument(c resolvedConstraints) ([]byte, string) {
 		ContentTypes []string `json:"contentTypes,omitempty"`
 		MaxSize      int64    `json:"maxSize,omitempty"`
 	}
-	body := marshalNoEscape(struct {
+	body, _ := marshalNoEscape(struct {
 		Protocol    int    `json:"protocol"`
 		Constraints served `json:"constraints"`
 	}{UploadProtocol, served{c.contentTypes, c.maxSize}})
@@ -485,7 +489,16 @@ func (m *mountedRoute[C]) post(w http.ResponseWriter, r *http.Request, ctx C, de
 	// Every successful answer carries the protocol of the server that wrote it: on a deploy,
 	// instances of two releases answer one upload side by side.
 	answer["protocol"] = UploadProtocol
-	writeJSON(w, 200, answer)
+	raw, err := marshalNoEscape(answer)
+	if err != nil {
+		// Only OnUploadComplete's data can fail to encode. The object is kept: the callback accepted it.
+		m.h.logger.Error("upstash-blob: an upload route answer could not be encoded", "path", details.path, "err", err)
+		writeJSON(w, 500, NewError(CodeRequestFailed, ErrorOptions{}))
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, _ = w.Write(raw)
 }
 
 func (m *mountedRoute[C]) dispatch(r *http.Request, ctx C, details *errorDetails) (map[string]any, error) {
@@ -774,11 +787,9 @@ func (m *mountedRoute[C]) end(r *http.Request, ctx C, body map[string]json.RawMe
 			if !HasCode(err, CodeNotFound) {
 				return nil, err
 			}
-			h, herr := m.r2.head(rctx, t.Path)
-			if herr != nil || h == nil {
+			if h, herr := m.r2.head(rctx, t.Path); herr != nil || h == nil {
 				return nil, err
 			}
-			completedETag = ""
 		}
 	}
 
@@ -1082,13 +1093,14 @@ func readFile(raw json.RawMessage) (UploadFile, error) {
 // answerError writes every refusal as the *Error JSON shape, so the browser rebuilds it with its
 // code intact. An error with no code and no status is the app's bug: logged, and answered as a 500.
 func (h *UploadHandler[C]) answerError(w http.ResponseWriter, r *http.Request, err error, mapper func(error, *errorDetails) error, details *errorDetails) {
+	// OnError answers with an *Error it returns; anything else leaves the answer alone.
 	if mapper != nil {
-		if mapped := mapper(err, details); mapped != nil {
+		if mapped, ok := asBlobError(mapper(err, details)); ok {
 			err = mapped
 		}
 	}
 	if be, ok := asBlobError(err); ok {
-		writeJSON(w, be.Status, be)
+		writeJSON(w, be.httpStatus(), be)
 		return
 	}
 	if status, ok := statusOf(err); ok {
@@ -1115,20 +1127,25 @@ func statusOf(err error) (int, bool) {
 	return 0, false
 }
 
+// writeJSON writes an answer whose encoding cannot fail: an *Error or the constraints document.
 func writeJSON(w http.ResponseWriter, status int, v any) {
+	raw, err := marshalNoEscape(v)
+	if err != nil {
+		status, raw = 500, []byte(`{"code":"request_failed","message":"Request failed","status":500}`)
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	_, _ = w.Write(marshalNoEscape(v))
+	_, _ = w.Write(raw)
 }
 
-func marshalNoEscape(v any) []byte {
+func marshalNoEscape(v any) ([]byte, error) {
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
 	enc.SetEscapeHTML(false)
 	if err := enc.Encode(v); err != nil {
-		return []byte(`{"code":"request_failed","message":"Request failed","status":500}`)
+		return nil, err
 	}
-	return bytes.TrimSuffix(buf.Bytes(), []byte("\n"))
+	return bytes.TrimSuffix(buf.Bytes(), []byte("\n")), nil
 }
 
 func jsonString(raw json.RawMessage) (string, bool) {
@@ -1182,7 +1199,8 @@ func deriveRouteID(c resolvedConstraints, hasInput bool, route string) string {
 	if c.maxSize > 0 {
 		maxSize = c.maxSize
 	}
-	return fnv36(string(marshalNoEscape([]any{route, types, maxSize, hasInput})))
+	raw, _ := marshalNoEscape([]any{route, types, maxSize, hasInput})
+	return fnv36(string(raw))
 }
 
 // fnv36 is FNV-1a over UTF-16 code units, in base 36. Not a security boundary: the token's MAC is.

@@ -55,7 +55,7 @@ blob.UpdateJSON(ctx, bucket, "u/7.json", func(prev *Settings) (Settings, error) 
 ```go
 read, err := bucket.SignedReadURL(ctx, "private/report.pdf", &blob.SignedReadURLOptions{DownloadAs: "report.pdf"})
 up, err := bucket.SignedUploadURL(ctx, "u/7/report.pdf", &blob.SignedUploadURLOptions{ContentType: "application/pdf", Size: size})
-// PUT up.URL with up.Headers
+// PUT up.URL with up.Headers, and Request.ContentLength set to the size
 ```
 
 Links are signed by Upstash and live at most 10 minutes (read default: 5); `ExpiresAt` is the
@@ -96,8 +96,9 @@ const upload = useUpload('avatar'); // POSTs to /api/upload?route=avatar
 - `OnUploadComplete` runs at least once per upload; `UploadID` is stable across deliveries.
   Returning an error deletes the object. `State` rides in a signed but readable token: an id, never
   a secret.
-- `OnError` sees every refusal; return a `*blob.Error` to answer with it. An error with a
-  `StatusCode() int` method answers with that status; any other error is logged and answered as a 500.
+- `OnError` sees every refusal; return a `*blob.Error` to answer with it. A callback error that is
+  or wraps a `*blob.Error` answers with its code; one with a `StatusCode() int` method answers with
+  that status; any other error is logged and answered as a 500 with no detail.
 - The handler speaks the same versioned upload protocol as `@upstash/blob`'s `uploadHandler`, so
   any release of the browser client works against it.
 

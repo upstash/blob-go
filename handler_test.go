@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -332,5 +333,48 @@ func TestHandlerConfigErrors(t *testing.T) {
 	}
 	if _, out, _ := serve(h, "GET", "/?route=pdf", nil); out["constraints"].(map[string]any)["maxSize"] != float64(10) {
 		t.Fatalf("inherited: %v", out)
+	}
+}
+
+func TestHandlerRound1Regressions(t *testing.T) {
+	f := newFake()
+	b := f.bucket(t)
+	var logs bytes.Buffer
+	h, err := NewUploadHandler(UploadHandlerOptions[int]{
+		Bucket:  b,
+		MaxSize: 10,
+		Logger:  slog.New(slog.NewTextHandler(&logs, nil)),
+		OnBeforeUpload: func(a BeforeUploadArgs[int]) (BeforeUploadResult, error) {
+			if a.File.Name == "hand.bin" {
+				return BeforeUploadResult{}, &Error{Code: CodeForbidden}
+			}
+			return BeforeUploadResult{Path: "u/" + a.File.Name}, nil
+		},
+		OnUploadComplete: func(a UploadCompleteArgs[int]) (any, error) { return math.NaN(), nil },
+		OnError:          func(a UploadErrorArgs[int]) error { return errors.New("logged it") },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A hand-built *Error with no Status answers with its code's.
+	if status, out, _ := serve(h, "POST", "/", begin("hand.bin", "", 1)); status != 403 || out["code"] != "forbidden" || out["message"] != "Forbidden" || out["status"] != float64(403) {
+		t.Fatalf("hand-built error: %d %v", status, out)
+	}
+	// OnError returning a plain error leaves the answer alone.
+	if status, out, _ := serve(h, "POST", "/", begin("big.bin", "", 11)); status != 413 || out["code"] != "too_large" {
+		t.Fatalf("OnError plain error: %d %v", status, out)
+	}
+	// Data that cannot be encoded is a 500, never a 200 with an error body.
+	_, out, _ := serve(h, "POST", "/", begin("nan.bin", "", 1))
+	part := out["upload"].(map[string]any)["parts"].([]any)[0].(map[string]any)
+	req, _ := http.NewRequest("PUT", part["url"].(string), strings.NewReader("x"))
+	for k, v := range part["headers"].(map[string]any) {
+		req.Header.Set(k, v.(string))
+	}
+	res, _ := f.client().Do(req)
+	res.Body.Close()
+	status, out, _ := serve(h, "POST", "/", map[string]any{"phase": "end", "completionToken": out["completionToken"], "parts": []any{map[string]any{"n": 1, "etag": "x"}}})
+	if status != 500 || out["code"] != "request_failed" || !strings.Contains(logs.String(), "could not be encoded") {
+		t.Fatalf("unencodable data: %d %v", status, out)
 	}
 }

@@ -191,7 +191,23 @@ func ErrorFromStatus(status int, opts ErrorOptions) *Error {
 	return NewError(code, opts)
 }
 
-func (e *Error) Error() string { return e.Message }
+func (e *Error) Error() string {
+	if e.Message == "" {
+		return sentenceCase(defaultMessage[e.Code])
+	}
+	return e.Message
+}
+
+// httpStatus is Status, or the code's own for an *Error built by hand without one.
+func (e *Error) httpStatus() int {
+	if e.Status >= 400 && e.Status < 600 {
+		return e.Status
+	}
+	if s, ok := codeStatus[e.Code]; ok {
+		return s
+	}
+	return 500
+}
 
 // Unwrap returns what caused the error, when the SDK knows: a network error, storage's own message,
 // or the signing service's reason for refusing a suspended or read-only bucket.
@@ -239,7 +255,11 @@ type errorJSON struct {
 // MarshalJSON writes the shape @upstash/blob's browser client rebuilds its BlobError from, with
 // RetryAfter in seconds. The cause is never sent.
 func (e *Error) MarshalJSON() ([]byte, error) {
-	out := errorJSON{Code: e.Code, Message: e.Message, Status: e.Status, Hint: e.Hint, Failed: e.Failed, ETag: e.ETag, Size: e.Size}
+	code := e.Code
+	if _, known := codeStatus[code]; !known {
+		code = CodeRequestFailed
+	}
+	out := errorJSON{Code: code, Message: e.Error(), Status: e.httpStatus(), Hint: e.Hint, Failed: e.Failed, ETag: e.ETag, Size: e.Size}
 	if e.RetryAfter > 0 {
 		s := e.RetryAfter.Seconds()
 		out.RetryAfter = &s
