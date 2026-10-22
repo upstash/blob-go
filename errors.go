@@ -192,6 +192,9 @@ func ErrorFromStatus(status int, opts ErrorOptions) *Error {
 }
 
 func (e *Error) Error() string {
+	if e == nil {
+		return "<nil>"
+	}
 	if e.Message == "" {
 		if m, ok := defaultMessage[e.Code]; ok {
 			return sentenceCase(m)
@@ -214,16 +217,18 @@ func (e *Error) httpStatus() int {
 
 // Unwrap returns what caused the error, when the SDK knows: a network error, storage's own message,
 // or the signing service's reason for refusing a suspended or read-only bucket.
-func (e *Error) Unwrap() error { return e.cause }
+func (e *Error) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.cause
+}
 
 // Is reports whether target is an *Error with the same Code, so errors.Is(err, blob.ErrNotFound)
 // works for any not_found the SDK returns.
 func (e *Error) Is(target error) bool {
-	var t *Error
-	if !errors.As(target, &t) {
-		return false
-	}
-	return t.Code == e.Code
+	t, ok := asBlobError(target)
+	return ok && e != nil && t.Code == e.Code
 }
 
 // Sentinels for errors.Is. Only the Code is compared.
@@ -240,8 +245,8 @@ var (
 
 // HasCode reports whether err is or wraps an *Error with this code.
 func HasCode(err error, code ErrorCode) bool {
-	var e *Error
-	return errors.As(err, &e) && e.Code == code
+	e, ok := asBlobError(err)
+	return ok && e.Code == code
 }
 
 type errorJSON struct {
@@ -273,7 +278,8 @@ func (e *Error) MarshalJSON() ([]byte, error) {
 // asBlobError finds the *Error in err's chain, if there is one.
 func asBlobError(err error) (*Error, bool) {
 	var e *Error
-	if errors.As(err, &e) {
+	// A nil *Error in an error interface is no answer, not an *Error to read a status off.
+	if errors.As(err, &e) && e != nil {
 		return e, true
 	}
 	return nil, false

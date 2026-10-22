@@ -627,4 +627,7 @@ func TestRound2Regressions(t *testing.T) {
 	if e := (&Error{Code: "custom"}); e.Error() != "Request failed" {
 		t.Fatalf("unknown code message: %q", e.Error())
 	}
+	if _, err := b.SignedUploadURL(ctx, "x", &SignedUploadURLOptions{ExpiresIn: -time.Second}); !HasCode(err, CodeInvalidInput) {
+		t.Fatal("negative upload ExpiresIn accepted")
+	}
 }

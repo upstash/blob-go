@@ -17,7 +17,6 @@ type decodedToken struct {
 	password string
 	// The bucket's public DNS label: <hashForDomain>.blob.upstash.io serves its objects.
 	hashForDomain string
-	flags         byte
 }
 
 // decodeToken reads a bucket token. Trailing bytes mean tampering, so the length check is exact.
@@ -37,7 +36,6 @@ func decodeToken(token string) (decodedToken, error) {
 		return decodedToken{}, errors.New("blob: token: malformed")
 	}
 	return decodedToken{
-		flags:         raw[1],
 		bucketID:      string(raw[6 : 6+idLen]),
 		password:      string(raw[6+idLen : 6+idLen+pwLen]),
 		hashForDomain: string(raw[6+idLen+pwLen:]),

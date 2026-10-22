@@ -610,9 +610,6 @@ func (b *Bucket) SignedReadURL(ctx context.Context, path string, opts *SignedRea
 	if opts.ExpiresIn < 0 {
 		return nil, newErr(CodeInvalidInput, "ExpiresIn cannot be negative")
 	}
-	if opts.ExpiresIn < 0 {
-		return nil, newErr(CodeInvalidInput, "ExpiresIn cannot be negative")
-	}
 	if opts.ExpiresIn != 0 {
 		expiresIn = durationSeconds(opts.ExpiresIn)
 	}
@@ -682,6 +679,9 @@ func (b *Bucket) SignedUploadURL(ctx context.Context, path string, opts *SignedU
 		return nil, err
 	}
 	expiresIn := maxPresignSeconds
+	if opts.ExpiresIn < 0 {
+		return nil, newErr(CodeInvalidInput, "ExpiresIn cannot be negative")
+	}
 	if opts.ExpiresIn != 0 {
 		expiresIn = durationSeconds(opts.ExpiresIn)
 	}

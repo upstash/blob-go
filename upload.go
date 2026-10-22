@@ -13,6 +13,7 @@ import (
 	"math"
 	"net/http"
 	"os"
+	"reflect"
 	"regexp"
 	"strconv"
 	"strings"
@@ -1124,12 +1125,17 @@ func (h *UploadHandler[C]) answerError(w http.ResponseWriter, r *http.Request, e
 // statusOf reads an HTTP status off an app error that names one with a StatusCode() int method.
 func statusOf(err error) (int, bool) {
 	var s interface{ StatusCode() int }
-	if errors.As(err, &s) {
+	if errors.As(err, &s) && !isNilPointer(s) {
 		if code := s.StatusCode(); code >= 400 && code < 600 {
 			return code, true
 		}
 	}
 	return 0, false
+}
+
+func isNilPointer(v any) bool {
+	rv := reflect.ValueOf(v)
+	return rv.Kind() == reflect.Pointer && rv.IsNil()
 }
 
 // writeJSON writes an answer whose encoding cannot fail: an *Error or the constraints document.

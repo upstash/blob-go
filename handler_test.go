@@ -408,3 +408,37 @@ func TestHandlerRound2Regressions(t *testing.T) {
 		t.Fatalf("end after the browser left: %d %s", w.Code, w.Body)
 	}
 }
+
+type nilStatus struct{ code int }
+
+func (e *nilStatus) Error() string   { return "nil status" }
+func (e *nilStatus) StatusCode() int { return e.code }
+
+func TestHandlerRound3Regressions(t *testing.T) {
+	f := newFake()
+	b := f.bucket(t)
+	var logs bytes.Buffer
+	h, _ := NewUploadHandler(UploadHandlerOptions[int]{
+		Bucket: b,
+		Logger: slog.New(slog.NewTextHandler(&logs, nil)),
+		OnBeforeUpload: func(a BeforeUploadArgs[int]) (BeforeUploadResult, error) {
+			if a.File.Name == "status.bin" {
+				var e *nilStatus
+				return BeforeUploadResult{}, e
+			}
+			var e *Error
+			return BeforeUploadResult{}, e
+		},
+		OnError: func(a UploadErrorArgs[int]) error { var e *Error; return e },
+	})
+	// A typed-nil *Error, or a typed-nil error with a StatusCode method, is the app's bug: a 500.
+	for _, name := range []string{"nil.bin", "status.bin"} {
+		if status, out, _ := serve(h, "POST", "/", begin(name, "", 1)); status != 500 || out["code"] != "request_failed" {
+			t.Fatalf("%s: %d %v", name, status, out)
+		}
+	}
+	var e *Error
+	if errors.Is(e, ErrNotFound) || errors.Is(ErrNotFound, e) || HasCode(e, CodeNotFound) {
+		t.Fatal("a nil *Error matched")
+	}
+}

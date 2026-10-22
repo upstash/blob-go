@@ -93,7 +93,8 @@ const upload = useUpload('avatar'); // POSTs to /api/upload?route=avatar
 - Leave `Bucket` nil to use `UPSTASH_BLOB_TOKEN`. Every handler option is a default a route may
   replace; on a route, `ContentTypes: []string{}` or `MaxSize: blob.NoLimit` clears the handler's.
 - `Input` validates what the browser sends as `input`; `blob.JSONInput[T]()` decodes it into a `T`.
-- `OnUploadComplete` runs at least once per upload; `UploadID` is stable across deliveries.
+- `OnUploadComplete` may run more than once, or never if the browser stops before the last phase;
+  write idempotently on `UploadID`, which is stable across deliveries.
   Returning an error deletes the object. `State` rides in a signed but readable token: an id, never
   a secret.
 - `OnError` sees every refusal; return a `*blob.Error` to answer with it. A callback error that is
