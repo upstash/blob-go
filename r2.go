@@ -61,6 +61,9 @@ type r2Request struct {
 	stream io.Reader
 	open   func() io.Reader
 	length int64
+	// resent, when set, is told whether the request went again after an attempt storage may have
+	// applied without the answer arriving: a dropped connection or a 5xx.
+	resent *bool
 }
 
 func (q *r2Request) streaming() bool { return q.stream != nil }
@@ -161,10 +164,17 @@ func (r *r2) fetch(ctx context.Context, q r2Request) (*http.Response, error) {
 				return nil, ctx.Err()
 			}
 			if attempt >= attempts {
-				return nil, NewError(CodeRequestFailed, ErrorOptions{Message: "could not reach storage", Status: 502, Cause: err})
+				message := "could not reach storage"
+				if signedWith == nil {
+					message = "could not reach the Upstash credential service"
+				}
+				return nil, NewError(CodeRequestFailed, ErrorOptions{Message: message, Status: 502, Cause: err})
 			}
 			if err := sleep(ctx, r.wait(attempt, "")); err != nil {
 				return nil, err
+			}
+			if q.resent != nil && signedWith != nil {
+				*q.resent = true
 			}
 			continue
 		}
@@ -193,6 +203,9 @@ func (r *r2) fetch(ctx context.Context, q r2Request) (*http.Response, error) {
 			drain(res)
 			if err := sleep(ctx, r.wait(attempt, retryAfter)); err != nil {
 				return nil, err
+			}
+			if q.resent != nil && res.StatusCode >= 500 {
+				*q.resent = true
 			}
 			continue
 		}

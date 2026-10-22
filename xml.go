@@ -4,27 +4,27 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"unicode/utf8"
 )
 
 // Storage's XML is read with patterns, as blob-js reads it, not with encoding/xml: a key may hold a
 // character XML 1.0 cannot carry, which encoding/xml refuses along with the whole listing, or a
 // "\r", which it reads back as "\n" and so names a different key.
-var xmlPatterns = map[string]*regexp.Regexp{}
+var xmlPatterns sync.Map // element name -> *regexp.Regexp
 
-func init() {
-	for _, name := range []string{
-		"Code", "Message", "Contents", "Key", "Size", "ETag", "LastModified", "IsTruncated",
-		"NextContinuationToken", "Error", "UploadId", "Part", "PartNumber", "NextPartNumberMarker",
-		"Upload", "Initiated", "NextKeyMarker", "NextUploadIdMarker",
-	} {
-		xmlPatterns[name] = regexp.MustCompile(`<` + name + `>([\s\S]*?)</` + name + `>`)
+func xmlPattern(name string) *regexp.Regexp {
+	if re, ok := xmlPatterns.Load(name); ok {
+		return re.(*regexp.Regexp)
 	}
+	q := regexp.QuoteMeta(name)
+	re, _ := xmlPatterns.LoadOrStore(name, regexp.MustCompile(`<`+q+`>([\s\S]*?)</`+q+`>`))
+	return re.(*regexp.Regexp)
 }
 
 // xmlTag is the text of the first <name> element, entities decoded, and whether there is one.
 func xmlTag(doc, name string) (string, bool) {
-	m := xmlPatterns[name].FindStringSubmatch(doc)
+	m := xmlPattern(name).FindStringSubmatch(doc)
 	if m == nil {
 		return "", false
 	}
@@ -39,7 +39,7 @@ func xmlText(doc, name string) string {
 
 // xmlBlocks is every <name> element, tags included, for reading its children with xmlTag.
 func xmlBlocks(doc, name string) []string {
-	return xmlPatterns[name].FindAllString(doc, -1)
+	return xmlPattern(name).FindAllString(doc, -1)
 }
 
 var entity = regexp.MustCompile(`&(#x[0-9a-fA-F]+|#[0-9]+|lt|gt|amp|quot|apos);`)

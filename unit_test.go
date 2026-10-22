@@ -648,3 +648,57 @@ func TestXMLReading(t *testing.T) {
 		t.Fatal("escape")
 	}
 }
+
+func TestRound5Regressions(t *testing.T) {
+	f := newFake()
+	b := f.bucket(t)
+	ctx := context.Background()
+
+	// A move onto itself keeps the object.
+	f.objects["x"] = &fakeObject{data: []byte("x"), headers: http.Header{"Content-Type": {"text/plain"}}, etag: `"x"`}
+	if _, err := b.Move(ctx, "x", "x", &CopyOptions{ContentType: "text/csv"}); err != nil || f.objects["x"] == nil {
+		t.Fatalf("move onto itself: %v", err)
+	}
+
+	// A conditional PUT stored by an attempt whose answer was lost is not a conflict on the retry.
+	storeThenLose := func(req *http.Request, body []byte) *http.Response {
+		if req.Method != "PUT" {
+			return nil
+		}
+		f.hook = nil
+		res, _ := f.RoundTrip(cloneWithBody(req, body))
+		res.Body.Close()
+		return respond(503, "")
+	}
+	f.objects["n.json"] = &fakeObject{data: []byte(`{"n":0}`), headers: http.Header{}, etag: `"n0"`}
+	runs := 0
+	f.hook = storeThenLose
+	if _, err := UpdateJSON(ctx, b, "n.json", func(prev *map[string]int) (map[string]int, error) {
+		runs++
+		return map[string]int{"n": (*prev)["n"] + 1}, nil
+	}, nil); err != nil || runs != 1 || string(f.objects["n.json"].data) != `{"n":1}` {
+		t.Fatalf("UpdateJSON after a lost answer: runs=%d %s %v", runs, f.objects["n.json"].data, err)
+	}
+	f.hook = storeThenLose
+	if _, err := b.Put(ctx, "new", strings.NewReader("mine"), &PutOptions{NoOverwrite: true}); err != nil {
+		t.Fatalf("NoOverwrite after a lost answer: %v", err)
+	}
+	// Someone else's object is still a refusal after a resend.
+	f.hook = func(req *http.Request, body []byte) *http.Response {
+		if req.Method != "PUT" {
+			return nil
+		}
+		f.hook = nil
+		f.objects["taken"] = &fakeObject{data: []byte("theirs"), headers: http.Header{}, etag: `"t"`}
+		return respond(503, "")
+	}
+	if _, err := b.Put(ctx, "taken", strings.NewReader("mine"), &PutOptions{NoOverwrite: true}); !HasCode(err, CodeAlreadyExists) {
+		t.Fatalf("someone else's object: %v", err)
+	}
+}
+
+func cloneWithBody(req *http.Request, body []byte) *http.Request {
+	c := req.Clone(req.Context())
+	c.Body = io.NopCloser(bytes.NewReader(body))
+	return c
+}

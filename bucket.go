@@ -3,6 +3,8 @@ package blob
 import (
 	"bytes"
 	"context"
+	"crypto/md5"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -276,7 +278,8 @@ func (b *Bucket) Put(ctx context.Context, path string, body io.Reader, opts *Put
 	if opts.IfUnchanged != "" {
 		headers["if-match"] = opts.IfUnchanged
 	}
-	q := r2Request{method: "PUT", path: path, headers: headers}
+	var resent bool
+	q := r2Request{method: "PUT", path: path, headers: headers, resent: &resent}
 	if size == 0 {
 		q.body = []byte{}
 	} else {
@@ -296,6 +299,13 @@ func (b *Bucket) Put(ctx context.Context, path string, body io.Reader, opts *Put
 	}
 	if res.StatusCode == 412 {
 		drain(res)
+		if resent {
+			// The precondition may have failed on this very write, stored by an attempt whose answer
+			// was lost: then the object's ETag is the body's MD5, and the write is not a conflict.
+			if head, err := b.r2.head(ctx, path); err == nil && head != nil && head.size == size && strings.Trim(head.etag, `"`) == bodyMD5(body0) {
+				return &CompletedBlob{BlobObject: b.r2.blobObject(path, size, head.etag, head.uploadedAt), ContentType: contentType}, nil
+			}
+		}
 		if opts.NoOverwrite {
 			head, err := b.r2.head(ctx, path)
 			if err != nil {
@@ -316,6 +326,18 @@ func (b *Bucket) Put(ctx context.Context, path string, body io.Reader, opts *Put
 	}
 	drain(res)
 	return &CompletedBlob{BlobObject: b.r2.blobObject(path, size, res.Header.Get("ETag"), time.Now()), ContentType: contentType}, nil
+}
+
+// bodyMD5 is the hex MD5 of a replayable body, a single PUT's ETag; "" for a stream.
+func bodyMD5(body resolvedBody) string {
+	if !body.replayable() {
+		return ""
+	}
+	h := md5.New()
+	if _, err := io.Copy(h, body.open()); err != nil {
+		return ""
+	}
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 func (b *Bucket) objectHeaders(contentType, cache string, metadata map[string]string) (map[string]string, error) {
@@ -1021,11 +1043,11 @@ func (b *Bucket) Copy(ctx context.Context, from, to string, opts *CopyOptions) (
 }
 
 // Move is a Copy followed by a Delete of the source: storage has no rename. A failed delete is
-// CodeMoveLeftACopy.
+// CodeMoveLeftACopy. A move onto itself is a Copy, so it only applies opts.
 func (b *Bucket) Move(ctx context.Context, from, to string, opts *CopyOptions) (*BlobObject, error) {
 	obj, err := b.Copy(ctx, from, to, opts)
-	if err != nil {
-		return nil, err
+	if err != nil || from == to {
+		return obj, err
 	}
 	if err := b.Delete(ctx, from); err != nil {
 		return nil, NewError(CodeMoveLeftACopy, ErrorOptions{Message: fmt.Sprintf("moved %s to %s but could not delete the source", from, to), Cause: err})
