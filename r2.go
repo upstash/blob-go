@@ -62,7 +62,7 @@ type r2Request struct {
 	open   func() io.Reader
 	length int64
 	// resent, when set, is told whether the request went again after an attempt storage may have
-	// applied without the answer arriving: a dropped connection or a 5xx.
+	// applied without its answer arriving: a dropped connection or a 5xx.
 	resent *bool
 }
 
@@ -259,7 +259,8 @@ func (r *r2) send(ctx context.Context, q r2Request) (*http.Response, *tempCreden
 	}
 	res, err := r.client.Do(req)
 	if err != nil {
-		return nil, nil, err
+		// The credential goes back with the error: it says the request reached the transport.
+		return nil, c, err
 	}
 	return res, c, nil
 }

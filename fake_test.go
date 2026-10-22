@@ -2,7 +2,6 @@ package blob
 
 import (
 	"bytes"
-	"crypto/md5"
 	"encoding/json"
 	"encoding/xml"
 	"fmt"
@@ -270,8 +269,8 @@ func (f *fake) store(req *http.Request, body []byte) *http.Response {
 		if m := req.Header.Get("If-Match"); m != "" && (cur == nil || cur.etag != m) {
 			return respond(412, "<Error><Code>PreconditionFailed</Code></Error>")
 		}
-		// Like R2, a single PUT's ETag is the body's MD5.
-		etag := fmt.Sprintf(`"%x"`, md5.Sum(body))
+		f.nextID++
+		etag := fmt.Sprintf(`"e%d"`, f.nextID)
 		f.objects[path] = &fakeObject{data: append([]byte(nil), body...), headers: req.Header.Clone(), etag: etag}
 		return respond(200, "", "ETag", etag)
 	case req.Method == "GET" || req.Method == "HEAD":

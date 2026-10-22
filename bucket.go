@@ -3,8 +3,6 @@ package blob
 import (
 	"bytes"
 	"context"
-	"crypto/md5"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -165,6 +163,8 @@ type PutOptions struct {
 	// by storage (If-None-Match: *) rather than by a racy read first.
 	NoOverwrite bool
 	// IfUnchanged is an etag: the write fails with CodeConflict if the object changed (If-Match).
+	// When an attempt was lost and its resend found the precondition failed, either answer could
+	// be wrong, so the write fails with CodeRequestFailed instead; the same goes for NoOverwrite.
 	IfUnchanged string
 	// Multipart says when the body goes up in parts. NoOverwrite and IfUnchanged are single-PUT only.
 	Multipart Multipart
@@ -300,11 +300,10 @@ func (b *Bucket) Put(ctx context.Context, path string, body io.Reader, opts *Put
 	if res.StatusCode == 412 {
 		drain(res)
 		if resent {
-			// The precondition may have failed on this very write, stored by an attempt whose answer
-			// was lost: then the object's ETag is the body's MD5, and the write is not a conflict.
-			if head, err := b.r2.head(ctx, path); err == nil && head != nil && head.size == size && strings.Trim(head.etag, `"`) == bodyMD5(body0) {
-				return &CompletedBlob{BlobObject: b.r2.blobObject(path, size, head.etag, head.uploadedAt), ContentType: contentType}, nil
-			}
+			// An earlier attempt may have stored this very write and lost its answer, so the failed
+			// precondition proves nothing: neither a conflict, which UpdateJSON would answer by
+			// applying its change again, nor a success, which may be someone else's write.
+			return nil, NewError(CodeRequestFailed, ErrorOptions{Message: "the write may or may not have been stored: an attempt failed without an answer and its resend found the precondition no longer held", Status: 502})
 		}
 		if opts.NoOverwrite {
 			head, err := b.r2.head(ctx, path)
@@ -326,18 +325,6 @@ func (b *Bucket) Put(ctx context.Context, path string, body io.Reader, opts *Put
 	}
 	drain(res)
 	return &CompletedBlob{BlobObject: b.r2.blobObject(path, size, res.Header.Get("ETag"), time.Now()), ContentType: contentType}, nil
-}
-
-// bodyMD5 is the hex MD5 of a replayable body, a single PUT's ETag; "" for a stream.
-func bodyMD5(body resolvedBody) string {
-	if !body.replayable() {
-		return ""
-	}
-	h := md5.New()
-	if _, err := io.Copy(h, body.open()); err != nil {
-		return ""
-	}
-	return hex.EncodeToString(h.Sum(nil))
 }
 
 func (b *Bucket) objectHeaders(contentType, cache string, metadata map[string]string) (map[string]string, error) {
@@ -773,6 +760,11 @@ func (b *Bucket) Delete(ctx context.Context, path string) error {
 // DeleteMany removes every path, a thousand per request. Paths that survive are reported as
 // CodePartialDelete with Failed set.
 func (b *Bucket) DeleteMany(ctx context.Context, paths []string) error {
+	for _, p := range paths {
+		if _, err := encodeKey(p); err != nil {
+			return err
+		}
+	}
 	var failed []string
 	for i := 0; i < len(paths); i += 1000 {
 		f, err := b.deleteBatch(ctx, paths[i:min(i+1000, len(paths))])
@@ -842,25 +834,29 @@ func (b *Bucket) deleteBatch(ctx context.Context, paths []string) ([]string, err
 	if len(paths) == 0 {
 		return nil, nil
 	}
-	var body strings.Builder
-	body.WriteString("<Delete>")
-	batched := 0
 	for _, p := range paths {
 		if _, err := encodeKey(p); err != nil {
 			return nil, err
 		}
-		if !xmlCarries(p) {
-			// A request body cannot name it, so it goes alone.
-			if err := b.Delete(ctx, p); err != nil {
-				return nil, err
-			}
-			continue
+	}
+	var body strings.Builder
+	body.WriteString("<Delete>")
+	var alone []string
+	for _, p := range paths {
+		if xmlCarries(p) {
+			body.WriteString("<Object><Key>" + escapeXML(p) + "</Key></Object>")
+		} else {
+			// A request body cannot name it, so it goes in a request of its own.
+			alone = append(alone, p)
 		}
-		body.WriteString("<Object><Key>" + escapeXML(p) + "</Key></Object>")
-		batched++
 	}
 	body.WriteString("</Delete>")
-	if batched == 0 {
+	for _, p := range alone {
+		if err := b.Delete(ctx, p); err != nil {
+			return nil, err
+		}
+	}
+	if len(alone) == len(paths) {
 		return nil, nil
 	}
 	res, err := b.r2.fetch(ctx, r2Request{method: "POST", query: map[string]string{"delete": ""}, headers: map[string]string{"content-type": "application/xml"}, body: []byte(body.String())})
@@ -1069,7 +1065,8 @@ type UpdateJSONOptions struct {
 // UpdateJSON is a read-modify-write over a JSON document: If-Match on the etag that was read, or
 // If-None-Match: * when nothing was there. fn gets nil when nothing, a zero-byte object, or JSON null is stored.
 // A write that lost the race is re-read and re-run after a short jittered pause, up to MaxAttempts
-// times; then it fails with CodeConflict. fn may run more than once.
+// times; then it fails with CodeConflict. fn may run more than once. A write whose outcome is
+// unknown (see PutOptions.IfUnchanged) fails with CodeRequestFailed rather than run fn again.
 func UpdateJSON[T any](ctx context.Context, b *Bucket, path string, fn func(prev *T) (T, error), opts *UpdateJSONOptions) (*BlobObject, error) {
 	if opts == nil {
 		opts = &UpdateJSONOptions{}

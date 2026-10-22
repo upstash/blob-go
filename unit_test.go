@@ -660,7 +660,8 @@ func TestRound5Regressions(t *testing.T) {
 		t.Fatalf("move onto itself: %v", err)
 	}
 
-	// A conditional PUT stored by an attempt whose answer was lost is not a conflict on the retry.
+	// A conditional PUT resent after an attempt that may have landed: the 412 proves nothing, so
+	// the write fails as unknown rather than run fn again or claim the object.
 	storeThenLose := func(req *http.Request, body []byte) *http.Response {
 		if req.Method != "PUT" {
 			return nil
@@ -676,24 +677,46 @@ func TestRound5Regressions(t *testing.T) {
 	if _, err := UpdateJSON(ctx, b, "n.json", func(prev *map[string]int) (map[string]int, error) {
 		runs++
 		return map[string]int{"n": (*prev)["n"] + 1}, nil
-	}, nil); err != nil || runs != 1 || string(f.objects["n.json"].data) != `{"n":1}` {
+	}, nil); !HasCode(err, CodeRequestFailed) || runs != 1 || string(f.objects["n.json"].data) != `{"n":1}` {
 		t.Fatalf("UpdateJSON after a lost answer: runs=%d %s %v", runs, f.objects["n.json"].data, err)
 	}
 	f.hook = storeThenLose
-	if _, err := b.Put(ctx, "new", strings.NewReader("mine"), &PutOptions{NoOverwrite: true}); err != nil {
+	if _, err := b.Put(ctx, "new", strings.NewReader("mine"), &PutOptions{NoOverwrite: true}); !HasCode(err, CodeRequestFailed) {
 		t.Fatalf("NoOverwrite after a lost answer: %v", err)
 	}
-	// Someone else's object is still a refusal after a resend.
-	f.hook = func(req *http.Request, body []byte) *http.Response {
-		if req.Method != "PUT" {
-			return nil
-		}
-		f.hook = nil
-		f.objects["taken"] = &fakeObject{data: []byte("theirs"), headers: http.Header{}, etag: `"t"`}
-		return respond(503, "")
+	// The same after a dropped connection.
+	dropped := f.bucket(t, func(o *Options) {
+		o.HTTPClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			res, err := f.RoundTrip(req)
+			if req.Method == "PUT" && req.URL.Path == "/bucket-1/drop" && f.objects["drop"] != nil && f.called("PUT acct.r2.cloudflarestorage.com/bucket-1/drop") == 1 {
+				res.Body.Close()
+				return nil, errors.New("connection reset")
+			}
+			return res, err
+		})}
+	})
+	if _, err := dropped.Put(ctx, "drop", strings.NewReader("mine"), &PutOptions{NoOverwrite: true}); !HasCode(err, CodeRequestFailed) {
+		t.Fatalf("NoOverwrite after a dropped connection: %v", err)
 	}
-	if _, err := b.Put(ctx, "taken", strings.NewReader("mine"), &PutOptions{NoOverwrite: true}); !HasCode(err, CodeAlreadyExists) {
-		t.Fatalf("someone else's object: %v", err)
+	// Without a lost attempt a 412 is still the plain refusal.
+	if _, err := b.Put(ctx, "new", strings.NewReader("again"), &PutOptions{NoOverwrite: true}); !HasCode(err, CodeAlreadyExists) {
+		t.Fatalf("plain NoOverwrite: %v", err)
+	}
+	// Storage out of reach is named as storage, not as the credential service.
+	unreachable := f.bucket(t, func(o *Options) {
+		o.Retry = RetryConfig{Disabled: true}
+		o.HTTPClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			if req.URL.Host != "blob.upstash.io" {
+				return nil, errors.New("no route")
+			}
+			return f.RoundTrip(req)
+		})}
+	})
+	if _, err := unreachable.Info(ctx, "x"); err == nil || err.Error() != "Could not reach storage" {
+		t.Fatalf("unreachable storage: %v", err)
+	}
+	if err := b.DeleteMany(ctx, []string{"a\x01", "../x"}); !HasCode(err, CodeInvalidInput) || f.called("DELETE") != 0 {
+		t.Fatalf("a refused key after a delete was sent: %v", err)
 	}
 }
 
