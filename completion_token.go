@@ -30,8 +30,6 @@ type tokenPayload struct {
 	Exp int64 `json:"exp"`
 	// R2's own multipart id; absent for a single PUT, which has no upload to complete or abort.
 	UploadID string `json:"uploadId,omitempty"`
-	// The handler's Owner of whoever began the upload; every later request must match it.
-	O *string `json:"o,omitempty"`
 	// The part size for a multipart, and the whole file for a single PUT.
 	PartSize int64 `json:"partSize"`
 }

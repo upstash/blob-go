@@ -72,7 +72,6 @@ completion callback.
 ```go
 uploads, err := blob.NewUploadHandler(blob.UploadHandlerOptions[*User]{
 	Context: requireUser, // func(*http.Request) (*User, error); return a 401 to refuse
-	Owner:   func(u *User) string { return u.ID },
 	OnBeforeUpload: func(a blob.BeforeUploadArgs[*User]) (blob.BeforeUploadResult, error) {
 		return blob.BeforeUploadResult{Path: blob.UniquePath("u/" + a.Ctx.ID + "/" + a.File.Name)}, nil
 	},

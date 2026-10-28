@@ -153,7 +153,6 @@ func TestHandlerLifecycle(t *testing.T) {
 	opts := UploadHandlerOptions[user]{
 		Bucket:  b,
 		Context: func(r *http.Request) (user, error) { return user{ID: r.Header.Get("X-User")}, nil },
-		Owner:   func(u user) string { return u.ID },
 		OnBeforeUpload: func(a BeforeUploadArgs[user]) (BeforeUploadResult, error) {
 			return BeforeUploadResult{Path: "u/" + a.File.Name, State: map[string]string{"by": a.Ctx.ID}}, nil
 		},
@@ -204,11 +203,6 @@ func TestHandlerLifecycle(t *testing.T) {
 		return landed
 	}
 
-	// No owner is a 401 before anything else happens.
-	if status, out := post("file", begin("a.bin", "", 3), ""); status != 401 || out["code"] != "unauthorized" {
-		t.Fatalf("no owner: %d %v", status, out)
-	}
-
 	// A single PUT, ended twice: the second is idempotent.
 	status, out := post("file", begin("a.bin", "", 3), "alice")
 	if status != 200 {
@@ -217,9 +211,6 @@ func TestHandlerLifecycle(t *testing.T) {
 	token := out["completionToken"].(string)
 	landed := putParts(out["upload"].(map[string]any), []byte("abc"))
 	end := map[string]any{"phase": "end", "completionToken": token, "parts": landed}
-	if status, out := post("file", end, "bob"); status != 403 || out["message"] != "This upload belongs to another user" {
-		t.Fatalf("bob ends alice's upload: %d %v", status, out)
-	}
 	if status, out := post("big", end, "alice"); status != 403 {
 		t.Fatalf("a token from another route: %d %v", status, out)
 	}
@@ -316,11 +307,10 @@ func TestHandlerConfigErrors(t *testing.T) {
 	b := f.bucket(t)
 	before := func(a BeforeUploadArgs[int]) (BeforeUploadResult, error) { return BeforeUploadResult{Path: "x"}, nil }
 	for name, opts := range map[string]UploadHandlerOptions[int]{
-		"owner without context": {Bucket: b, OnBeforeUpload: before, Owner: func(int) string { return "" }},
-		"no before":             {Bucket: b},
-		"empty routes":          {Bucket: b, OnBeforeUpload: before, Routes: map[string]UploadRoute[int]{}},
-		"bad route name":        {Bucket: b, OnBeforeUpload: before, Routes: map[string]UploadRoute[int]{"a b": {}}},
-		"bad pattern":           {Bucket: b, OnBeforeUpload: before, ContentTypes: []string{"*/*"}},
+		"no before":      {Bucket: b},
+		"empty routes":   {Bucket: b, OnBeforeUpload: before, Routes: map[string]UploadRoute[int]{}},
+		"bad route name": {Bucket: b, OnBeforeUpload: before, Routes: map[string]UploadRoute[int]{"a b": {}}},
+		"bad pattern":    {Bucket: b, OnBeforeUpload: before, ContentTypes: []string{"*/*"}},
 	} {
 		if _, err := NewUploadHandler(opts); err == nil {
 			t.Errorf("%s: accepted", name)

@@ -154,10 +154,6 @@ type UploadHandlerOptions[C any] struct {
 	// is Ctx in every callback. Return an *Error with CodeUnauthorized (or any error with a
 	// StatusCode() int method) to refuse. Not run for GET, which serves a public constraints document.
 	Context func(r *http.Request) (C, error)
-	// Owner binds an upload to whoever began it, read from Ctx: func(u *User) string { return u.ID }.
-	// A later request whose Ctx names someone else is a 403 before storage or any callback is
-	// touched. An empty owner is a 401. Needs Context.
-	Owner func(ctx C) string
 	// Input validates the browser's input; its result is BeforeUploadArgs.Input. With none, a route
 	// refuses input rather than dropping it. See JSONInput.
 	Input func(raw json.RawMessage) (any, error)
@@ -212,13 +208,9 @@ type UploadHandler[C any] struct {
 var routeName = regexp.MustCompile(`^[A-Za-z_][\w-]*$`)
 
 // NewUploadHandler builds the server half of a direct browser upload. Check the session in Context,
-// bind uploads with Owner, return the path from OnBeforeUpload, and record the file in
-// OnUploadComplete, keyed by path. Signing, multipart, retries, cancel and completion checks are the
+// return the path from OnBeforeUpload, and record the file in OnUploadComplete, keyed by path. Signing, multipart, retries, cancel and completion checks are the
 // SDK's.
 func NewUploadHandler[C any](opts UploadHandlerOptions[C]) (*UploadHandler[C], error) {
-	if opts.Owner != nil && opts.Context == nil {
-		return nil, errors.New("blob: NewUploadHandler: Owner reads Ctx, so it needs a Context")
-	}
 	if opts.MaxSize < 0 {
 		return nil, errors.New("blob: NewUploadHandler: MaxSize cannot be negative")
 	}
@@ -537,18 +529,6 @@ func (m *mountedRoute[C]) dispatch(r *http.Request, ctx C, details *errorDetails
 	return nil, newErr(CodeInvalidInput, "unknown phase "+phase)
 }
 
-func (m *mountedRoute[C]) ownerOf(ctx C) (*string, error) {
-	if m.h.opts.Owner == nil {
-		return nil, nil
-	}
-	// A session lookup that found nobody is a 401, never an upload owned by "".
-	owner := m.h.opts.Owner(ctx)
-	if owner == "" {
-		return nil, newErr(CodeUnauthorized, "no signed-in user to own this upload")
-	}
-	return &owner, nil
-}
-
 func (m *mountedRoute[C]) begin(r *http.Request, ctx C, body map[string]json.RawMessage, details *errorDetails) (map[string]any, error) {
 	file, err := readFile(body["file"])
 	if err != nil {
@@ -570,12 +550,6 @@ func (m *mountedRoute[C]) begin(r *http.Request, ctx C, body map[string]json.Raw
 	if err != nil {
 		return nil, err
 	}
-	// Before OnBeforeUpload and storage: a request with no owner must leave no row and no multipart.
-	owner, err := m.ownerOf(ctx)
-	if err != nil {
-		return nil, err
-	}
-
 	decided, err := m.before(BeforeUploadArgs[C]{Ctx: ctx, Route: m.name, Request: r, File: file, Input: input})
 	if err != nil {
 		return nil, err
@@ -689,7 +663,6 @@ func (m *mountedRoute[C]) begin(r *http.Request, ctx C, body map[string]json.Raw
 		Ctx:      state,
 		Exp:      time.Now().Add(tokenTTL).UnixMilli(),
 		UploadID: uploadID,
-		O:        owner,
 		PartSize: partSize,
 	}
 	token, err := signCompletionToken(payload, m.r2.signingSecret)
@@ -720,7 +693,7 @@ func (m *mountedRoute[C]) begin(r *http.Request, ctx C, body map[string]json.Raw
 }
 
 func (m *mountedRoute[C]) parts(r *http.Request, ctx C, body map[string]json.RawMessage, details *errorDetails) (map[string]any, error) {
-	t, err := m.verify(ctx, body["completionToken"], details)
+	t, err := m.verify(body["completionToken"], details)
 	if err != nil {
 		return nil, err
 	}
@@ -746,7 +719,7 @@ func (m *mountedRoute[C]) parts(r *http.Request, ctx C, body map[string]json.Raw
 }
 
 func (m *mountedRoute[C]) end(r *http.Request, ctx C, body map[string]json.RawMessage, details *errorDetails) (map[string]any, error) {
-	t, err := m.verify(ctx, body["completionToken"], details)
+	t, err := m.verify(body["completionToken"], details)
 	if err != nil {
 		return nil, err
 	}
@@ -906,7 +879,7 @@ func (m *mountedRoute[C]) discard(ctx context.Context, path, etag string) {
 }
 
 func (m *mountedRoute[C]) cancel(r *http.Request, ctx C, body map[string]json.RawMessage, details *errorDetails) (map[string]any, error) {
-	t, err := m.verify(ctx, body["completionToken"], details)
+	t, err := m.verify(body["completionToken"], details)
 	if err != nil {
 		return nil, err
 	}
@@ -929,7 +902,7 @@ func (m *mountedRoute[C]) cancel(r *http.Request, ctx C, body map[string]json.Ra
 	return map[string]any{"ok": true}, nil
 }
 
-func (m *mountedRoute[C]) verify(ctx C, raw json.RawMessage, details *errorDetails) (*tokenPayload, error) {
+func (m *mountedRoute[C]) verify(raw json.RawMessage, details *errorDetails) (*tokenPayload, error) {
 	token, ok := jsonString(raw)
 	if !ok {
 		return nil, newErr(CodeInvalidInput, "completionToken is required")
@@ -940,18 +913,6 @@ func (m *mountedRoute[C]) verify(ctx C, raw json.RawMessage, details *errorDetai
 	}
 	if t.Exp < time.Now().UnixMilli() {
 		return nil, newErr(CodeForbidden, "completionToken has expired")
-	}
-	// A token is a bearer capability, so without this anyone signed in who holds one could finish,
-	// re-sign or cancel somebody else's upload. Checked before storage or any callback is touched,
-	// and before details names the path.
-	if m.h.opts.Owner != nil {
-		owner, err := m.ownerOf(ctx)
-		if err != nil {
-			return nil, err
-		}
-		if t.O == nil || *t.O != *owner {
-			return nil, newErr(CodeForbidden, "this upload belongs to another user")
-		}
 	}
 	details.path = t.Path
 	details.state = t.Ctx

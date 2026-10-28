@@ -181,7 +181,7 @@ func TestCompletionTokenAndRouteIDMatchBlobJS(t *testing.T) {
 	// Minted by blob-js signToken with key "pw-secret".
 	js := "eyJ2IjoxLCJiIjoiYnVja2V0LTEiLCJyIjoicjEiLCJpZCI6InUtMSIsInBhdGgiOiJhL2IucG5nIiwibiI6ImIucG5nIiwidHlwZSI6ImltYWdlL3BuZyIsInNpemUiOjEwLCJoZWFkZXJzIjp7ImNvbnRlbnQtdHlwZSI6ImltYWdlL3BuZyJ9LCJjdHgiOnsiayI6InYifSwiZXhwIjo0MTAyNDQ0ODAwMDAwLCJvIjoiYWxpY2UiLCJwYXJ0U2l6ZSI6MTB9.BI8wo5Scg61pbyhyasIPzckWSGHZtJ2e9w2VMKD11I0"
 	p := verifyCompletionToken(js, "pw-secret")
-	if p == nil || p.Path != "a/b.png" || *p.O != "alice" || string(p.Ctx) != `{"k":"v"}` || p.Exp != 4102444800000 {
+	if p == nil || p.Path != "a/b.png" || string(p.Ctx) != `{"k":"v"}` || p.Exp != 4102444800000 {
 		t.Fatalf("%+v", p)
 	}
 	if verifyCompletionToken(js, "other") != nil || verifyCompletionToken(js[:len(js)-2]+"AA", "pw-secret") != nil || verifyCompletionToken("x", "pw-secret") != nil {
