@@ -208,8 +208,8 @@ type UploadHandler[C any] struct {
 var routeName = regexp.MustCompile(`^[A-Za-z_][\w-]*$`)
 
 // NewUploadHandler builds the server half of a direct browser upload. Check the session in Context,
-// return the path from OnBeforeUpload, and record the file in OnUploadComplete, keyed by path. Signing, multipart, retries, cancel and completion checks are the
-// SDK's.
+// return the path from OnBeforeUpload, and record the file in OnUploadComplete, keyed by path.
+// Signing, multipart, retries, cancel and completion checks are the SDK's.
 func NewUploadHandler[C any](opts UploadHandlerOptions[C]) (*UploadHandler[C], error) {
 	if opts.MaxSize < 0 {
 		return nil, errors.New("blob: NewUploadHandler: MaxSize cannot be negative")
@@ -518,13 +518,13 @@ func (m *mountedRoute[C]) dispatch(r *http.Request, ctx C, details *errorDetails
 	case "begin":
 		return m.begin(r, ctx, body, details)
 	case "parts":
-		return m.parts(r, ctx, body, details)
+		return m.parts(r, body, details)
 	case "end":
 		// Run to the end even if the browser leaves: a multipart completed and then abandoned is a
 		// stored object OnUploadComplete never saw. The browser counts on 'end' finishing without it.
 		return m.end(r.WithContext(context.WithoutCancel(r.Context())), ctx, body, details)
 	case "cancel":
-		return m.cancel(r.WithContext(context.WithoutCancel(r.Context())), ctx, body, details)
+		return m.cancel(r.WithContext(context.WithoutCancel(r.Context())), body, details)
 	}
 	return nil, newErr(CodeInvalidInput, "unknown phase "+phase)
 }
@@ -692,7 +692,7 @@ func (m *mountedRoute[C]) begin(r *http.Request, ctx C, body map[string]json.Raw
 	}, nil
 }
 
-func (m *mountedRoute[C]) parts(r *http.Request, ctx C, body map[string]json.RawMessage, details *errorDetails) (map[string]any, error) {
+func (m *mountedRoute[C]) parts(r *http.Request, body map[string]json.RawMessage, details *errorDetails) (map[string]any, error) {
 	t, err := m.verify(body["completionToken"], details)
 	if err != nil {
 		return nil, err
@@ -878,7 +878,7 @@ func (m *mountedRoute[C]) discard(ctx context.Context, path, etag string) {
 	}
 }
 
-func (m *mountedRoute[C]) cancel(r *http.Request, ctx C, body map[string]json.RawMessage, details *errorDetails) (map[string]any, error) {
+func (m *mountedRoute[C]) cancel(r *http.Request, body map[string]json.RawMessage, details *errorDetails) (map[string]any, error) {
 	t, err := m.verify(body["completionToken"], details)
 	if err != nil {
 		return nil, err
