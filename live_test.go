@@ -10,13 +10,20 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
 
 // Live tests run against real buckets and need UPSTASH_BLOB_PUBLIC_TOKEN and
-// UPSTASH_BLOB_PRIVATE_TOKEN. They write only under go-live/<run>/ and delete it afterwards.
+// UPSTASH_BLOB_PRIVATE_TOKEN. They write only under test/go/<run>/ and delete it afterwards.
+
+// Every SDK shares the test buckets under test/<sdk>/; these tests touch nothing outside test/go/.
+const liveRoot = "test/go/"
+
+var liveSwept sync.Map // token env -> *sync.Once
 
 func liveBucket(t *testing.T, env string) (*Bucket, string) {
 	t.Helper()
@@ -28,7 +35,13 @@ func liveBucket(t *testing.T, env string) (*Bucket, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	prefix := fmt.Sprintf("go-live/%d-%s/", time.Now().UnixNano(), randomSuffix())
+	once, _ := liveSwept.LoadOrStore(env, new(sync.Once))
+	once.(*sync.Once).Do(func() {
+		if err := sweepLive(b); err != nil {
+			t.Fatalf("sweep: %v", err)
+		}
+	})
+	prefix := fmt.Sprintf("%s%x-%s/", liveRoot, time.Now().UnixMilli(), randomSuffix())
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 		defer cancel()
@@ -40,6 +53,39 @@ func liveBucket(t *testing.T, env string) (*Bucket, string) {
 		}
 	})
 	return b, prefix
+}
+
+// sweepLive deletes what a killed run left under test/go/: runs and multipart uploads over an hour old.
+func sweepLive(b *Bucket) error {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	if _, err := b.AbortStaleMultipartUploads(ctx, time.Hour, liveRoot); err != nil {
+		return err
+	}
+	cutoff := time.Now().Add(-time.Hour).UnixMilli()
+	stale := map[string]bool{}
+	for cursor := ""; ; {
+		page, err := b.List(ctx, &ListOptions{Prefix: liveRoot, Cursor: cursor})
+		if err != nil {
+			return err
+		}
+		for _, o := range page.Blobs {
+			run, _, _ := strings.Cut(strings.TrimPrefix(o.Path, liveRoot), "/")
+			ts, _, _ := strings.Cut(run, "-")
+			if started, err := strconv.ParseInt(ts, 16, 64); err == nil && started < cutoff {
+				stale[liveRoot+run+"/"] = true
+			}
+		}
+		if cursor = page.Cursor; cursor == "" {
+			break
+		}
+	}
+	for prefix := range stale {
+		if err := b.DeletePrefix(ctx, prefix); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func randomBytes(n int) []byte {

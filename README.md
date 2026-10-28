@@ -142,7 +142,7 @@ go vet ./... && go test -race ./...
 ```
 
 Live tests run against real buckets when `UPSTASH_BLOB_PUBLIC_TOKEN` and
-`UPSTASH_BLOB_PRIVATE_TOKEN` are set, and write only under `go-live/`.
+`UPSTASH_BLOB_PRIVATE_TOKEN` are set, and write only under `test/go/`.
 
 ## License
 
