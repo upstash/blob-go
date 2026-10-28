@@ -552,7 +552,7 @@ func (b *Bucket) List(ctx context.Context, opts *ListOptions) (*ListPage, error)
 	if opts.Cursor != "" {
 		query["continuation-token"] = opts.Cursor
 	}
-	res, err := b.r2.fetch(ctx, r2Request{method: "GET", query: query})
+	res, err := b.r2.fetch(ctx, r2Request{method: "GET", bucket: true, query: query})
 	if err != nil {
 		return nil, err
 	}
@@ -859,7 +859,7 @@ func (b *Bucket) deleteBatch(ctx context.Context, paths []string) ([]string, err
 	if len(alone) == len(paths) {
 		return nil, nil
 	}
-	res, err := b.r2.fetch(ctx, r2Request{method: "POST", query: map[string]string{"delete": ""}, headers: map[string]string{"content-type": "application/xml"}, body: []byte(body.String())})
+	res, err := b.r2.fetch(ctx, r2Request{method: "POST", bucket: true, query: map[string]string{"delete": ""}, headers: map[string]string{"content-type": "application/xml"}, body: []byte(body.String())})
 	if err != nil {
 		return nil, err
 	}
@@ -962,6 +962,9 @@ func (b *Bucket) Copy(ctx context.Context, from, to string, opts *CopyOptions) (
 	}
 	encFrom, err := encodeKey(from)
 	if err != nil {
+		return nil, err
+	}
+	if _, err := encodeKey(to); err != nil {
 		return nil, err
 	}
 	creds, err := b.r2.credentials(ctx)

@@ -52,8 +52,11 @@ type r2 struct {
 
 type r2Request struct {
 	method string
-	// path is the object key; "" addresses the bucket itself.
-	path    string
+	// path is the object key. It may be empty only on a bucket request.
+	path string
+	// bucket addresses the bucket itself (List, DeleteMany's batch, listing multipart uploads). Any
+	// other request with an empty path is refused, so a caller's "" never reaches the bucket root.
+	bucket  bool
 	query   map[string]string
 	headers map[string]string
 	// At most one of body, stream and open. A stream is sent once and never retried; open hands
@@ -172,6 +175,9 @@ func (r *r2) wait(attempt int, retryAfter string) time.Duration {
 // that can be sent twice safely; multipart complete and the batch delete are POSTs and are not. A
 // stream is never retried: it has already been read once.
 func (r *r2) fetch(ctx context.Context, q r2Request) (*http.Response, error) {
+	if q.path == "" && !q.bucket {
+		return nil, newErr(CodeInvalidInput, "path must be a non-empty string")
+	}
 	streaming := q.streaming()
 	attempts := 1
 	if !streaming && retriableMethods[q.method] {
@@ -577,7 +583,7 @@ func (r *r2) listMultipartUploads(ctx context.Context, prefix string) ([]Multipa
 		if idMarker != "" {
 			query["upload-id-marker"] = idMarker
 		}
-		res, err := r.fetch(ctx, r2Request{method: "GET", query: query})
+		res, err := r.fetch(ctx, r2Request{method: "GET", bucket: true, query: query})
 		if err != nil {
 			return nil, err
 		}
