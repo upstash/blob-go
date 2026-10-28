@@ -758,3 +758,30 @@ func cloneWithBody(req *http.Request, body []byte) *http.Request {
 	c.Body = io.NopCloser(bytes.NewReader(body))
 	return c
 }
+
+func TestEmptyPathNeverReachesTheBucketRoot(t *testing.T) {
+	f := newFake()
+	b := f.bucket(t)
+	ctx := context.Background()
+	if _, err := b.Get(ctx, ""); !HasCode(err, CodeInvalidInput) {
+		t.Errorf("Get: %v", err)
+	}
+	if _, err := b.Info(ctx, ""); !HasCode(err, CodeInvalidInput) {
+		t.Errorf("Info: %v", err)
+	}
+	if ok, err := b.Exists(ctx, ""); ok || !HasCode(err, CodeInvalidInput) {
+		t.Errorf("Exists: %v %v", ok, err)
+	}
+	if err := b.Delete(ctx, ""); !HasCode(err, CodeInvalidInput) {
+		t.Errorf("Delete: %v", err)
+	}
+	if _, err := b.Copy(ctx, "a.txt", "", nil); !HasCode(err, CodeInvalidInput) {
+		t.Errorf("Copy to empty: %v", err)
+	}
+	if n := f.called("GET ") + f.called("HEAD ") + f.called("DELETE ") + f.called("PUT "); n != 0 {
+		t.Errorf("%d storage requests for an empty path", n)
+	}
+	if _, err := b.List(ctx, nil); err != nil {
+		t.Errorf("List: %v", err)
+	}
+}
