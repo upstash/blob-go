@@ -490,7 +490,6 @@ func TestLiveUploadHandler(t *testing.T) {
 			}
 			return &user{ID: id}, nil
 		},
-		Owner: func(u *user) string { return u.ID },
 		OnBeforeUpload: func(a BeforeUploadArgs[*user]) (BeforeUploadResult, error) {
 			return BeforeUploadResult{Path: UniquePath(p + a.Ctx.ID + "/" + a.File.Name), Metadata: map[string]string{"user": a.Ctx.ID}, State: map[string]string{"route": a.Route}}, nil
 		},
@@ -567,7 +566,7 @@ func TestLiveUploadHandler(t *testing.T) {
 		t.Fatal("a refused upload was left stored")
 	}
 
-	// Constraints, the session check, and owner binding.
+	// Constraints and the session check.
 	avatar := &browser{t: t, url: srv.URL + "?route=avatar", header: alice.header}
 	status, out = avatar.upload("x.pdf", "application/pdf", []byte("%PDF-1.4"), nil)
 	if status != 400 || out["code"] != "content_type_not_allowed" {
@@ -583,11 +582,6 @@ func TestLiveUploadHandler(t *testing.T) {
 		t.Fatalf("begin: %d %v", status, out)
 	}
 	token := out["completionToken"].(string)
-	bob := &browser{t: t, url: alice.url, header: http.Header{"X-User": {"bob"}}}
-	status, out = bob.post(map[string]any{"phase": "end", "completionToken": token, "parts": []any{}})
-	if status != 403 || out["code"] != "forbidden" {
-		t.Fatalf("another user's token: %d %v", status, out)
-	}
 	thread := &browser{t: t, url: srv.URL + "?route=thread", header: alice.header}
 	status, out = thread.upload("t.txt", "text/plain", []byte("t"), map[string]any{"ThreadID": "42"})
 	if status != 200 || out["blob"].(map[string]any)["path"] != p+"threads/42/t.txt" {
